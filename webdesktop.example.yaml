@@ -20,6 +20,12 @@ video:
     vp8_cpu_used: 8
     h264_speed_preset: veryfast
 
+input:
+  enabled: true
+  pointer: true
+  keyboard: true
+  queue_size: 256
+
 webrtc:
   signaling_path: /webrtc
   max_peers: 2

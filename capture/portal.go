@@ -24,12 +24,13 @@ const (
 )
 
 const (
-	portalDestination   = "org.freedesktop.portal.Desktop"
-	portalPath          = dbus.ObjectPath("/org/freedesktop/portal/desktop")
-	screenCastInterface = "org.freedesktop.portal.ScreenCast"
-	requestInterface    = "org.freedesktop.portal.Request"
-	sessionInterface    = "org.freedesktop.portal.Session"
-	propertiesInterface = "org.freedesktop.DBus.Properties"
+	portalDestination      = "org.freedesktop.portal.Desktop"
+	portalPath             = dbus.ObjectPath("/org/freedesktop/portal/desktop")
+	screenCastInterface    = "org.freedesktop.portal.ScreenCast"
+	remoteDesktopInterface = "org.freedesktop.portal.RemoteDesktop"
+	requestInterface       = "org.freedesktop.portal.Request"
+	sessionInterface       = "org.freedesktop.portal.Session"
+	propertiesInterface    = "org.freedesktop.DBus.Properties"
 
 	requestResponseSignal = requestInterface + ".Response"
 	sessionClosedSignal   = sessionInterface + ".Closed"
@@ -37,6 +38,8 @@ const (
 	sourceTypeMonitor  uint32 = 1
 	cursorModeHidden   uint32 = 1
 	cursorModeEmbedded uint32 = 2
+	deviceTypeKeyboard uint32 = 1
+	deviceTypePointer  uint32 = 2
 
 	portalCleanupTimeout = 2 * time.Second
 )
@@ -50,6 +53,14 @@ var (
 type Config struct {
 	Source     string
 	CursorMode string
+	Input      InputConfig
+}
+
+// InputConfig controls whether the portal session also authorizes remote input.
+type InputConfig struct {
+	Enabled  bool
+	Pointer  bool
+	Keyboard bool
 }
 
 // Validate checks the implemented portal capture options.
@@ -65,6 +76,9 @@ func (cfg Config) Validate() error {
 	default:
 		errs = append(errs, errors.New("capture cursor mode must be hidden or embedded"))
 	}
+	if cfg.Input.Enabled && !cfg.Input.Pointer && !cfg.Input.Keyboard {
+		errs = append(errs, errors.New("capture input requires pointer or keyboard"))
+	}
 
 	return errors.Join(errs...)
 }
@@ -75,6 +89,7 @@ type Stream struct {
 	NodeID            uint32
 	PipeWireSerial    uint64
 	HasPipeWireSerial bool
+	MappingID         string
 	Properties        map[string]dbus.Variant
 
 	remote    *os.File
@@ -94,15 +109,25 @@ type streamMetadata struct {
 	nodeID            uint32
 	pipeWireSerial    uint64
 	hasPipeWireSerial bool
+	mappingID         string
 	properties        map[string]dbus.Variant
 }
 
-// Session owns one portal ScreenCast session and its PipeWire remote.
+// InputAuthorization reports the device classes granted by the portal.
+type InputAuthorization struct {
+	Enabled  bool
+	Pointer  bool
+	Keyboard bool
+}
+
+// Session owns one portal session and its PipeWire and optional EIS remotes.
 type Session struct {
 	conn         *dbus.Conn
 	path         dbus.ObjectPath
 	remote       *os.File
+	eisRemote    *os.File
 	stream       streamMetadata
+	input        InputAuthorization
 	signals      chan *dbus.Signal
 	sessionMatch []dbus.MatchOption
 
@@ -114,7 +139,7 @@ type Session struct {
 	err       error
 }
 
-// Open runs the xdg-desktop-portal ScreenCast flow and returns one monitor stream.
+// Open runs the xdg-desktop-portal capture flow and returns one monitor stream.
 func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -147,6 +172,7 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 	sessionMatchAdded := false
 	var sessionPath dbus.ObjectPath
 	var remote *os.File
+	var eisRemote *os.File
 
 	defer func() {
 		if err == nil {
@@ -159,6 +185,9 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		}
 		if remote != nil {
 			cleanupErr = errors.Join(cleanupErr, remote.Close())
+		}
+		if eisRemote != nil {
+			cleanupErr = errors.Join(cleanupErr, eisRemote.Close())
 		}
 
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), portalCleanupTimeout)
@@ -195,11 +224,15 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("create portal session token: %w", err)
 	}
-	createResults, err := client.request(ctx, "CreateSession", "", map[string]dbus.Variant{
+	createInterface := screenCastInterface
+	if cfg.Input.Enabled {
+		createInterface = remoteDesktopInterface
+	}
+	createResults, err := client.request(ctx, createInterface, "CreateSession", "", map[string]dbus.Variant{
 		"session_handle_token": dbus.MakeVariant(sessionToken),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create screen cast session: %w", err)
+		return nil, fmt.Errorf("create portal session: %w", err)
 	}
 
 	sessionHandle, ok := createResults["session_handle"]
@@ -256,7 +289,7 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, fmt.Errorf("desktop portal does not advertise requested %s cursor mode", cfg.CursorMode)
 	}
 
-	if _, err := client.request(ctx, "SelectSources", sessionPath, map[string]dbus.Variant{
+	if _, err := client.request(ctx, screenCastInterface, "SelectSources", sessionPath, map[string]dbus.Variant{
 		"types":       dbus.MakeVariant(sourceTypeMonitor),
 		"multiple":    dbus.MakeVariant(false),
 		"cursor_mode": dbus.MakeVariant(cursorMode),
@@ -264,8 +297,59 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, fmt.Errorf("select screen cast source: %w", err)
 	}
 
+	requestedDevices := uint32(0)
+	if cfg.Input.Enabled {
+		var remoteDesktopVersionVariant dbus.Variant
+		if err := client.object.CallWithContext(
+			ctx,
+			propertiesInterface+".Get",
+			0,
+			remoteDesktopInterface,
+			"version",
+		).Store(&remoteDesktopVersionVariant); err != nil {
+			return nil, fmt.Errorf("read remote desktop portal version: %w", err)
+		}
+		var remoteDesktopVersion uint32
+		if err := dbus.Store([]any{remoteDesktopVersionVariant}, &remoteDesktopVersion); err != nil {
+			return nil, fmt.Errorf("decode remote desktop portal version: %w", err)
+		}
+		if remoteDesktopVersion < 2 {
+			return nil, fmt.Errorf("remote desktop portal version %d does not support ConnectToEIS", remoteDesktopVersion)
+		}
+
+		var availableDeviceTypesVariant dbus.Variant
+		if err := client.object.CallWithContext(
+			ctx,
+			propertiesInterface+".Get",
+			0,
+			remoteDesktopInterface,
+			"AvailableDeviceTypes",
+		).Store(&availableDeviceTypesVariant); err != nil {
+			return nil, fmt.Errorf("read available remote desktop device types: %w", err)
+		}
+		var availableDeviceTypes uint32
+		if err := dbus.Store([]any{availableDeviceTypesVariant}, &availableDeviceTypes); err != nil {
+			return nil, fmt.Errorf("decode available remote desktop device types: %w", err)
+		}
+		if cfg.Input.Pointer {
+			requestedDevices |= deviceTypePointer
+		}
+		if cfg.Input.Keyboard {
+			requestedDevices |= deviceTypeKeyboard
+		}
+		if missing := requestedDevices &^ availableDeviceTypes; missing != 0 {
+			return nil, fmt.Errorf("desktop portal does not advertise requested input device types 0x%x", missing)
+		}
+		if _, err := client.request(ctx, remoteDesktopInterface, "SelectDevices", sessionPath, map[string]dbus.Variant{
+			"types": dbus.MakeVariant(requestedDevices),
+		}, sessionPath); err != nil {
+			return nil, fmt.Errorf("select remote desktop devices: %w", err)
+		}
+	}
+
 	startResults, err := client.request(
 		ctx,
+		createInterface,
 		"Start",
 		sessionPath,
 		map[string]dbus.Variant{},
@@ -298,6 +382,23 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 			return nil, fmt.Errorf("decode screen cast pipewire-serial: %w", err)
 		}
 	}
+	var mappingID string
+	if mappingIDVariant, ok := streams[0].Properties["mapping_id"]; ok {
+		if err := dbus.Store([]any{mappingIDVariant}, &mappingID); err != nil {
+			return nil, fmt.Errorf("decode screen cast mapping_id: %w", err)
+		}
+	}
+
+	authorizedDevices := uint32(0)
+	if cfg.Input.Enabled {
+		devicesVariant, ok := startResults["devices"]
+		if !ok {
+			return nil, errors.New("start remote desktop response did not contain devices")
+		}
+		if err := dbus.Store([]any{devicesVariant}, &authorizedDevices); err != nil {
+			return nil, fmt.Errorf("decode authorized remote desktop devices: %w", err)
+		}
+	}
 
 	if err := conn.RemoveMatchSignalContext(ctx, requestMatch...); err != nil {
 		return nil, fmt.Errorf("unsubscribe from portal request responses: %w", err)
@@ -323,15 +424,42 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, fmt.Errorf("open portal PipeWire file descriptor %d", remoteFD)
 	}
 
+	if cfg.Input.Enabled {
+		var eisFD dbus.UnixFD
+		if err := client.object.CallWithContext(
+			ctx,
+			remoteDesktopInterface+".ConnectToEIS",
+			0,
+			sessionPath,
+			map[string]dbus.Variant{},
+		).Store(&eisFD); err != nil {
+			return nil, fmt.Errorf("connect portal session to EIS: %w", err)
+		}
+		if eisFD < 0 {
+			return nil, fmt.Errorf("portal returned invalid EIS file descriptor %d", eisFD)
+		}
+		eisRemote = os.NewFile(uintptr(eisFD), "xdg-desktop-portal-eis")
+		if eisRemote == nil {
+			return nil, fmt.Errorf("open portal EIS file descriptor %d", eisFD)
+		}
+	}
+
 	session := &Session{
-		conn:   conn,
-		path:   sessionPath,
-		remote: remote,
+		conn:      conn,
+		path:      sessionPath,
+		remote:    remote,
+		eisRemote: eisRemote,
 		stream: streamMetadata{
 			nodeID:            streams[0].NodeID,
 			pipeWireSerial:    pipeWireSerial,
 			hasPipeWireSerial: hasPipeWireSerial,
+			mappingID:         mappingID,
 			properties:        streams[0].Properties,
+		},
+		input: InputAuthorization{
+			Enabled:  cfg.Input.Enabled,
+			Pointer:  authorizedDevices&deviceTypePointer != 0,
+			Keyboard: authorizedDevices&deviceTypeKeyboard != 0,
 		},
 		signals:      signals,
 		sessionMatch: sessionMatch,
@@ -371,9 +499,43 @@ func (s *Session) AcquireStream() (*Stream, error) {
 		NodeID:            s.stream.nodeID,
 		PipeWireSerial:    s.stream.pipeWireSerial,
 		HasPipeWireSerial: s.stream.hasPipeWireSerial,
+		MappingID:         s.stream.mappingID,
 		Properties:        s.stream.properties,
 		remote:            duplicate,
 	}, nil
+}
+
+// AcquireEIS duplicates the portal EIS connection for one libei sender.
+// The caller owns the returned file descriptor and must close or transfer it.
+func (s *Session) AcquireEIS() (int, error) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
+	if s.closing {
+		if s.err != nil {
+			return -1, s.err
+		}
+		return -1, ErrSessionClosed
+	}
+	if s.eisRemote == nil {
+		return -1, errors.New("portal session does not have an EIS connection")
+	}
+
+	duplicateFD, err := unix.FcntlInt(s.eisRemote.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("duplicate portal EIS file descriptor: %w", err)
+	}
+	return duplicateFD, nil
+}
+
+// InputAuthorization reports the portal device selection.
+func (s *Session) InputAuthorization() InputAuthorization {
+	return s.input
+}
+
+// MappingID identifies the EIS absolute region paired with the captured stream.
+func (s *Session) MappingID() string {
+	return s.stream.mappingID
 }
 
 // Done closes when the portal closes the session or Close finishes.
@@ -426,6 +588,9 @@ func (s *Session) finish(closePortal bool, cause error) {
 			cleanupErr = errors.Join(cleanupErr, closePortalObject(s.conn, s.path, sessionInterface))
 		}
 		cleanupErr = errors.Join(cleanupErr, s.remote.Close())
+		if s.eisRemote != nil {
+			cleanupErr = errors.Join(cleanupErr, s.eisRemote.Close())
+		}
 
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), portalCleanupTimeout)
 		defer cancel()
@@ -449,6 +614,7 @@ type portalClient struct {
 
 func (c portalClient) request(
 	ctx context.Context,
+	iface string,
 	method string,
 	sessionPath dbus.ObjectPath,
 	options map[string]dbus.Variant,
@@ -468,7 +634,7 @@ func (c portalClient) request(
 	var requestPath dbus.ObjectPath
 	if err := c.object.CallWithContext(
 		ctx,
-		screenCastInterface+"."+method,
+		iface+"."+method,
 		0,
 		callArgs...,
 	).Store(&requestPath); err != nil {

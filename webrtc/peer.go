@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtcp"
 	pion "github.com/pion/webrtc/v4"
+	remoteinput "github.com/tarik02/webdesktop/input"
 	"github.com/tarik02/webdesktop/media"
 	"go.uber.org/zap"
 )
@@ -22,6 +23,7 @@ import (
 const (
 	maxSignalingMessageBytes = 128 * 1024
 	maxControlMessageBytes   = 16 * 1024
+	maxInputMessageBytes     = 4 * 1024
 	maxQueuedCandidates      = 256
 	peerSampleQueueSize      = 8
 
@@ -50,6 +52,7 @@ type peer struct {
 
 	signalWriteMu  sync.Mutex
 	controlWriteMu sync.Mutex
+	inputWriteMu   sync.Mutex
 
 	offerHandled             bool
 	remoteDescriptionSet     bool
@@ -60,6 +63,10 @@ type peer struct {
 	connectedKeyframeRequest sync.Once
 	controlMu                sync.Mutex
 	control                  *pion.DataChannel
+	inputMu                  sync.Mutex
+	input                    *pion.DataChannel
+	inputSequence            uint64
+	inputSequenceSet         bool
 }
 
 func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
@@ -443,8 +450,20 @@ func (p *peer) readRTCP() {
 }
 
 func (p *peer) onDataChannel(channel *pion.DataChannel) {
-	if channel.Label() != "control" {
+	switch channel.Label() {
+	case "control":
+		p.setControlChannel(channel)
+	case "input":
+		p.setInputChannel(channel)
+	default:
 		p.logger.Info("rejecting unsupported data channel", zap.String("label", channel.Label()))
+		_ = channel.Close()
+	}
+}
+
+func (p *peer) setControlChannel(channel *pion.DataChannel) {
+	if !channel.Ordered() || channel.MaxPacketLifeTime() != nil || channel.MaxRetransmits() != nil {
+		p.logger.Info("rejecting control data channel without reliable ordered delivery")
 		_ = channel.Close()
 		return
 	}
@@ -464,12 +483,47 @@ func (p *peer) onDataChannel(channel *pion.DataChannel) {
 	})
 	channel.OnClose(func() {
 		p.logger.Info("control data channel closed")
+		_ = p.service.input.Release(p.id)
 	})
 	channel.OnError(func(err error) {
 		p.logger.Debug("control data channel error", zap.Error(err))
+		_ = p.service.input.Release(p.id)
 	})
 	channel.OnMessage(func(message pion.DataChannelMessage) {
 		p.handleControlMessage(channel, message)
+	})
+}
+
+func (p *peer) setInputChannel(channel *pion.DataChannel) {
+	if !channel.Ordered() || channel.MaxPacketLifeTime() != nil || channel.MaxRetransmits() != nil {
+		p.logger.Info("rejecting input data channel without reliable ordered delivery")
+		_ = channel.Close()
+		return
+	}
+
+	p.inputMu.Lock()
+	if p.input != nil {
+		p.inputMu.Unlock()
+		p.logger.Info("rejecting duplicate input data channel")
+		_ = channel.Close()
+		return
+	}
+	p.input = channel
+	p.inputMu.Unlock()
+
+	channel.OnOpen(func() {
+		p.logger.Info("input data channel opened")
+	})
+	channel.OnClose(func() {
+		p.logger.Info("input data channel closed")
+		_ = p.service.input.Release(p.id)
+	})
+	channel.OnError(func(err error) {
+		p.logger.Debug("input data channel error", zap.Error(err))
+		_ = p.service.input.Release(p.id)
+	})
+	channel.OnMessage(func(message pion.DataChannelMessage) {
+		p.handleInputMessage(channel, message)
 	})
 }
 
@@ -494,6 +548,54 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	}
 	if protocolErr := validateControlRequest(request); protocolErr != nil {
 		p.writeControlError(channel, request.ID.Value, protocolErr.Code, protocolErr.Message)
+		return
+	}
+
+	switch request.Type.Value {
+	case controlTypeInputAcquire:
+		if !p.connected.Load() {
+			p.writeControlError(channel, request.ID.Value, "peer_not_connected", "WebRTC peer is not connected")
+			return
+		}
+		p.inputMu.Lock()
+		inputChannel := p.input
+		p.inputMu.Unlock()
+		if inputChannel == nil || inputChannel.ReadyState() != pion.DataChannelStateOpen {
+			p.writeControlError(channel, request.ID.Value, "input_channel_required", "an open reliable ordered input data channel is required")
+			return
+		}
+		capabilities, err := p.service.input.Acquire(p.id, p.onInputRevoked)
+		if err != nil {
+			code := inputErrorCode(err)
+			p.writeControlError(channel, request.ID.Value, code, err.Error())
+			return
+		}
+		if !p.writeControl(channel, controlResponse{
+			Version: controlVersion,
+			ID:      request.ID.Value,
+			Type:    controlTypeInputAcquireResult,
+			OK:      true,
+			Input: &controlInput{
+				Pointer:  capabilities.Pointer,
+				Keyboard: capabilities.Keyboard,
+			},
+		}) {
+			go p.Close()
+		}
+		return
+	case controlTypeInputRelease:
+		if err := p.service.input.Release(p.id); err != nil {
+			p.writeControlError(channel, request.ID.Value, inputErrorCode(err), err.Error())
+			return
+		}
+		if !p.writeControl(channel, controlResponse{
+			Version: controlVersion,
+			ID:      request.ID.Value,
+			Type:    controlTypeInputReleaseResult,
+			OK:      true,
+		}) {
+			go p.Close()
+		}
 		return
 	}
 
@@ -541,6 +643,58 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		Quality: qualityResponse(effective),
 	}) {
 		go p.Close()
+	}
+}
+
+func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataChannelMessage) {
+	if !message.IsString {
+		p.writeInputError(channel, nil, "invalid_message", "input messages must be text")
+		return
+	}
+	if len(message.Data) > maxInputMessageBytes {
+		p.writeInputError(channel, nil, "message_too_large", "input message exceeds 4096 bytes")
+		return
+	}
+	if !utf8.Valid(message.Data) {
+		p.writeInputError(channel, nil, "invalid_message", "input message is not valid UTF-8")
+		return
+	}
+
+	request, err := decodeInputRequest(message.Data)
+	sequence := inputSequencePointer(request)
+	if err != nil {
+		p.writeInputError(channel, sequence, "invalid_message", fmt.Sprintf("decode input message: %v", err))
+		return
+	}
+	event, protocolErr := validateInputRequest(request)
+	if protocolErr != nil {
+		p.writeInputError(channel, sequence, protocolErr.Code, protocolErr.Message)
+		return
+	}
+
+	p.inputMu.Lock()
+	if p.inputSequenceSet && request.Sequence.Value <= p.inputSequence {
+		p.inputMu.Unlock()
+		p.writeInputError(channel, sequence, "invalid_sequence", "sequence must increase monotonically")
+		return
+	}
+	p.inputSequence = request.Sequence.Value
+	p.inputSequenceSet = true
+	p.inputMu.Unlock()
+
+	if !p.connected.Load() {
+		p.writeInputError(channel, sequence, "peer_not_connected", "WebRTC peer is not connected")
+		return
+	}
+	if !p.service.input.Owns(p.id) {
+		p.writeInputError(channel, sequence, "input_not_owned", "peer does not own input")
+		return
+	}
+	if err := p.service.input.Submit(p.id, event); err != nil {
+		if errors.Is(err, remoteinput.ErrOverloaded) {
+			return
+		}
+		p.writeInputError(channel, sequence, inputErrorCode(err), err.Error())
 	}
 }
 
@@ -630,6 +784,75 @@ func (p *peer) writeControl(channel *pion.DataChannel, response controlResponse)
 	return true
 }
 
+func (p *peer) onInputRevoked(sequence uint64, cause error) {
+	p.inputMu.Lock()
+	channel := p.input
+	p.inputMu.Unlock()
+	if channel == nil {
+		return
+	}
+	var correlation *uint64
+	if sequence != 0 {
+		correlation = &sequence
+	}
+	p.writeInputError(channel, correlation, inputErrorCode(cause), cause.Error())
+	_ = channel.Close()
+}
+
+func (p *peer) writeInputError(channel *pion.DataChannel, sequence *uint64, code, message string) {
+	data, err := json.Marshal(inputResponse{
+		Version:  inputVersion,
+		Sequence: sequence,
+		Type:     inputTypeError,
+		OK:       false,
+		Error: &protocolError{
+			Code:    code,
+			Message: message,
+		},
+	})
+	if err != nil {
+		p.logger.Error("encode input response", zap.Error(err))
+		return
+	}
+
+	p.inputWriteMu.Lock()
+	defer p.inputWriteMu.Unlock()
+	if err := channel.SendText(string(data)); err != nil {
+		p.logger.Debug("input data channel write stopped", zap.Error(err))
+	}
+}
+
+func inputSequencePointer(request inputRequest) *uint64 {
+	if !request.Sequence.Set {
+		return nil
+	}
+	sequence := request.Sequence.Value
+	return &sequence
+}
+
+func inputErrorCode(err error) string {
+	switch {
+	case errors.Is(err, remoteinput.ErrBusy):
+		return "input_busy"
+	case errors.Is(err, remoteinput.ErrDisabled):
+		return "input_disabled"
+	case errors.Is(err, remoteinput.ErrPointerUnauthorized):
+		return "input_pointer_unauthorized"
+	case errors.Is(err, remoteinput.ErrKeyboardUnauthorized):
+		return "input_keyboard_unauthorized"
+	case errors.Is(err, remoteinput.ErrNotReady):
+		return "input_not_ready"
+	case errors.Is(err, remoteinput.ErrNotOwner):
+		return "input_not_owned"
+	case errors.Is(err, remoteinput.ErrOverloaded):
+		return "input_overloaded"
+	case errors.Is(err, remoteinput.ErrClosed):
+		return "input_unavailable"
+	default:
+		return "input_failed"
+	}
+}
+
 // Close releases the socket, peer connection, and peer accounting exactly once.
 func (p *peer) Close() {
 	p.closeWith(websocket.CloseNormalClosure, "peer closed")
@@ -638,6 +861,7 @@ func (p *peer) Close() {
 func (p *peer) closeWith(code int, reason string) {
 	p.closeOnce.Do(func() {
 		p.connected.Store(false)
+		_ = p.service.input.Release(p.id)
 		p.cancel()
 		p.service.removePeer(p)
 		_ = p.conn.WriteControl(

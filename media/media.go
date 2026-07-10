@@ -206,8 +206,8 @@ func New(cfg Config, logger *zap.Logger) (*Service, error) {
 	}, nil
 }
 
-// Run requests capture authorization and encodes until the context is canceled.
-func (s *Service) Run(ctx context.Context) (runErr error) {
+// Run encodes one already-authorized portal session until the context is canceled.
+func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr error) {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
@@ -215,19 +215,17 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 	}
 	s.started = true
 	s.mu.Unlock()
+	if session == nil {
+		return errors.New("portal capture session is required")
+	}
 
 	defer s.closeSamples.Do(func() {
 		close(s.samples)
 	})
 
-	session, err := capture.Open(ctx, s.cfg.Capture)
-	if err != nil {
-		return fmt.Errorf("open desktop capture: %w", err)
-	}
-
 	stream, err := session.AcquireStream()
 	if err != nil {
-		return errors.Join(fmt.Errorf("acquire desktop capture stream: %w", err), session.Close())
+		return fmt.Errorf("acquire desktop capture stream: %w", err)
 	}
 	pipeline, err := newVideoPipeline(
 		stream,
@@ -237,7 +235,7 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 		s.logger.Named("gstreamer"),
 	)
 	if err != nil {
-		return errors.Join(fmt.Errorf("start video pipeline: %w", err), session.Close())
+		return fmt.Errorf("start video pipeline: %w", err)
 	}
 
 	s.mu.Lock()
@@ -266,7 +264,6 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 		if current != nil {
 			runErr = errors.Join(runErr, current.Close())
 		}
-		runErr = errors.Join(runErr, session.Close())
 		s.logger.Info("desktop capture stopped")
 	}()
 

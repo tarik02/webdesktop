@@ -38,6 +38,7 @@
           mediaBuildInputs = [
             pkgs.gst_all_1.gstreamer
             pkgs.gst_all_1.gst-plugins-base
+            pkgs.libei
           ];
         in
         {
@@ -83,12 +84,14 @@
               go
               pkgs.gopls
               pkgs.gotools
+              pkgs.clang-tools
               pkgs.nixfmt
               pkgs.gst_all_1.gstreamer.bin
             ]
             ++ gstPlugins;
 
             GST_PLUGIN_SYSTEM_PATH_1_0 = gstPluginPath;
+            CGO_ENABLED = "1";
           };
 
           formatter = pkgs.nixfmt;

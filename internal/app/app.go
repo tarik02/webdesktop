@@ -8,7 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tarik02/webdesktop/capture"
 	"github.com/tarik02/webdesktop/config"
+	"github.com/tarik02/webdesktop/desktop"
 	"github.com/tarik02/webdesktop/httpserver"
+	remoteinput "github.com/tarik02/webdesktop/input"
 	"github.com/tarik02/webdesktop/logging"
 	"github.com/tarik02/webdesktop/media"
 	rtc "github.com/tarik02/webdesktop/webrtc"
@@ -17,10 +19,11 @@ import (
 
 // App wires the service dependencies.
 type App struct {
-	logger *zap.Logger
-	server *httpserver.Server
-	media  *media.Service
-	webrtc *rtc.Service
+	logger  *zap.Logger
+	server  *httpserver.Server
+	desktop *desktop.Service
+	input   *remoteinput.Controller
+	webrtc  *rtc.Service
 }
 
 // New constructs the application wiring.
@@ -32,11 +35,28 @@ func New(cfg config.Config) (*App, error) {
 
 	gin.SetMode(gin.ReleaseMode)
 
-	mediaService, err := media.New(media.Config{
-		Capture: capture.Config{
-			Source:     cfg.Video.Source,
-			CursorMode: cfg.Video.CursorMode,
+	portalConfig := capture.Config{
+		Source:     cfg.Video.Source,
+		CursorMode: cfg.Video.CursorMode,
+		Input: capture.InputConfig{
+			Enabled:  cfg.Input.Enabled,
+			Pointer:  cfg.Input.Pointer,
+			Keyboard: cfg.Input.Keyboard,
 		},
+	}
+	inputController, err := remoteinput.New(remoteinput.Config{
+		Enabled:   cfg.Input.Enabled,
+		Pointer:   cfg.Input.Pointer,
+		Keyboard:  cfg.Input.Keyboard,
+		QueueSize: cfg.Input.QueueSize,
+	})
+	if err != nil {
+		_ = logger.Sync()
+		return nil, err
+	}
+
+	mediaService, err := media.New(media.Config{
+		Capture: portalConfig,
 		Quality: media.Quality{
 			Codec:       cfg.Video.Codec,
 			Width:       cfg.Video.Width,
@@ -52,6 +72,19 @@ func New(cfg config.Config) (*App, error) {
 		},
 	}, logger.Named("media"))
 	if err != nil {
+		_ = inputController.Close()
+		_ = logger.Sync()
+		return nil, err
+	}
+
+	desktopService, err := desktop.New(
+		portalConfig,
+		mediaService,
+		inputController,
+		logger.Named("desktop"),
+	)
+	if err != nil {
+		_ = inputController.Close()
 		_ = logger.Sync()
 		return nil, err
 	}
@@ -65,8 +98,9 @@ func New(cfg config.Config) (*App, error) {
 		UDPPortMax:     uint16(cfg.WebRTC.UDPPortMax),
 		MaxPeers:       cfg.WebRTC.MaxPeers,
 		AllowedOrigins: cfg.WebRTC.AllowedOrigins,
-	}, mediaService, logger.Named("webrtc"))
+	}, mediaService, inputController, logger.Named("webrtc"))
 	if err != nil {
+		_ = inputController.Close()
 		_ = logger.Sync()
 		return nil, err
 	}
@@ -76,15 +110,17 @@ func New(cfg config.Config) (*App, error) {
 	})
 	if err != nil {
 		webrtcService.Close()
+		_ = inputController.Close()
 		_ = logger.Sync()
 		return nil, err
 	}
 
 	return &App{
-		logger: logger,
-		server: server,
-		media:  mediaService,
-		webrtc: webrtcService,
+		logger:  logger,
+		server:  server,
+		desktop: desktopService,
+		input:   inputController,
+		webrtc:  webrtcService,
 	}, nil
 }
 
@@ -104,7 +140,7 @@ func (a *App) Serve(ctx context.Context) error {
 		results <- result{component: "http server", err: a.server.Serve(runCtx)}
 	}()
 	go func() {
-		results <- result{component: "media", err: a.media.Run(runCtx)}
+		results <- result{component: "desktop", err: a.desktop.Run(runCtx)}
 	}()
 	go func() {
 		results <- result{component: "WebRTC", err: a.webrtc.Run(runCtx)}
@@ -135,5 +171,6 @@ func (a *App) Serve(ctx context.Context) error {
 // Close flushes buffered log entries.
 func (a *App) Close() {
 	a.webrtc.Close()
+	_ = a.input.Close()
 	_ = a.logger.Sync()
 }

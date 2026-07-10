@@ -15,6 +15,7 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/stun/v3"
 	pion "github.com/pion/webrtc/v4"
+	remoteinput "github.com/tarik02/webdesktop/input"
 	"github.com/tarik02/webdesktop/media"
 	"go.uber.org/zap"
 )
@@ -108,6 +109,7 @@ func (cfg Config) Validate() error {
 type Service struct {
 	cfg        Config
 	source     Media
+	input      *remoteinput.Controller
 	logger     *zap.Logger
 	capability pion.RTPCodecCapability
 
@@ -128,12 +130,15 @@ type Service struct {
 }
 
 // New constructs a reusable WebRTC service without opening listeners.
-func New(cfg Config, source Media, logger *zap.Logger) (*Service, error) {
+func New(cfg Config, source Media, inputController *remoteinput.Controller, logger *zap.Logger) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	if source == nil {
 		return nil, errors.New("WebRTC media source is required")
+	}
+	if inputController == nil {
+		return nil, errors.New("WebRTC input controller is required")
 	}
 	if logger == nil {
 		return nil, errors.New("WebRTC logger is required")
@@ -166,6 +171,7 @@ func New(cfg Config, source Media, logger *zap.Logger) (*Service, error) {
 	return &Service{
 		cfg:              cfg,
 		source:           source,
+		input:            inputController,
 		logger:           logger,
 		capability:       capability,
 		ctx:              ctx,

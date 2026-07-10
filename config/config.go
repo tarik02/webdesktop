@@ -33,6 +33,7 @@ type Config struct {
 	Server  Server  `mapstructure:"server" yaml:"server"`
 	Logging Logging `mapstructure:"logging" yaml:"logging"`
 	Video   Video   `mapstructure:"video" yaml:"video"`
+	Input   Input   `mapstructure:"input" yaml:"input"`
 	WebRTC  WebRTC  `mapstructure:"webrtc" yaml:"webrtc"`
 }
 
@@ -66,6 +67,14 @@ type VideoTuning struct {
 	KeyframeInterval int    `mapstructure:"keyframe_interval" yaml:"keyframe_interval"`
 	VP8CPUUsed       int    `mapstructure:"vp8_cpu_used" yaml:"vp8_cpu_used"`
 	H264SpeedPreset  string `mapstructure:"h264_speed_preset" yaml:"h264_speed_preset"`
+}
+
+// Input contains static remote input settings.
+type Input struct {
+	Enabled   bool `mapstructure:"enabled" yaml:"enabled"`
+	Pointer   bool `mapstructure:"pointer" yaml:"pointer"`
+	Keyboard  bool `mapstructure:"keyboard" yaml:"keyboard"`
+	QueueSize int  `mapstructure:"queue_size" yaml:"queue_size"`
 }
 
 // WebRTC contains static peer transport and signaling settings.
@@ -105,6 +114,12 @@ func Defaults() Config {
 				VP8CPUUsed:       8,
 				H264SpeedPreset:  "veryfast",
 			},
+		},
+		Input: Input{
+			Enabled:   true,
+			Pointer:   true,
+			Keyboard:  true,
+			QueueSize: 256,
 		},
 		WebRTC: WebRTC{
 			SignalingPath:  "/webrtc",
@@ -192,6 +207,13 @@ func (cfg Config) Validate() error {
 	case "ultrafast", "superfast", "veryfast", "faster", "fast", "medium":
 	default:
 		errs = append(errs, errors.New("video.tuning.h264_speed_preset must be ultrafast, superfast, veryfast, faster, fast, or medium"))
+	}
+
+	if cfg.Input.Enabled && !cfg.Input.Pointer && !cfg.Input.Keyboard {
+		errs = append(errs, errors.New("input requires pointer or keyboard when enabled"))
+	}
+	if cfg.Input.QueueSize < 16 || cfg.Input.QueueSize > 4096 {
+		errs = append(errs, errors.New("input.queue_size must be between 16 and 4096"))
 	}
 
 	if cfg.WebRTC.SignalingPath == "" ||

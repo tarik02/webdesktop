@@ -7,24 +7,38 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	pion "github.com/pion/webrtc/v4"
+	"github.com/tarik02/webdesktop/input"
 	"github.com/tarik02/webdesktop/media"
 )
 
 const (
 	signalingVersion = 1
 	controlVersion   = 1
+	inputVersion     = 1
 
 	signalTypeOffer        = "offer"
 	signalTypeAnswer       = "answer"
 	signalTypeICECandidate = "ice-candidate"
 	signalTypeError        = "error"
 
-	controlTypeQualitySet       = "video.quality.set"
-	controlTypeQualitySetResult = "video.quality.set.result"
-	controlTypeError            = "error"
+	controlTypeQualitySet         = "video.quality.set"
+	controlTypeQualitySetResult   = "video.quality.set.result"
+	controlTypeInputAcquire       = "input.acquire"
+	controlTypeInputAcquireResult = "input.acquire.result"
+	controlTypeInputRelease       = "input.release"
+	controlTypeInputReleaseResult = "input.release.result"
+	controlTypeError              = "error"
+
+	inputTypePointerAbsolute = "input.pointer.motion.absolute"
+	inputTypePointerRelative = "input.pointer.motion.relative"
+	inputTypePointerButton   = "input.pointer.button"
+	inputTypePointerScroll   = "input.pointer.scroll"
+	inputTypeKeyboardKey     = "input.keyboard.key"
+	inputTypeError           = "error"
 )
 
 type protocolError struct {
@@ -48,6 +62,58 @@ func (value *optionalString) UnmarshalJSON(data []byte) error {
 type optionalInt struct {
 	Value int
 	Set   bool
+}
+
+type optionalUint32 struct {
+	Value uint32
+	Set   bool
+}
+
+func (value *optionalUint32) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(data, []byte("null")) {
+		return errors.New("null is not allowed")
+	}
+	value.Set = true
+	return json.Unmarshal(data, &value.Value)
+}
+
+type optionalUint64 struct {
+	Value uint64
+	Set   bool
+}
+
+func (value *optionalUint64) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(data, []byte("null")) {
+		return errors.New("null is not allowed")
+	}
+	value.Set = true
+	return json.Unmarshal(data, &value.Value)
+}
+
+type optionalFloat64 struct {
+	Value float64
+	Set   bool
+}
+
+func (value *optionalFloat64) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(data, []byte("null")) {
+		return errors.New("null is not allowed")
+	}
+	value.Set = true
+	return json.Unmarshal(data, &value.Value)
+}
+
+type optionalBool struct {
+	Value bool
+	Set   bool
+}
+
+func (value *optionalBool) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(data, []byte("null")) {
+		return errors.New("null is not allowed")
+	}
+	value.Set = true
+	return json.Unmarshal(data, &value.Value)
 }
 
 func (value *optionalInt) UnmarshalJSON(data []byte) error {
@@ -146,13 +212,44 @@ type controlQuality struct {
 	BitrateKbps int    `json:"bitrate_kbps"`
 }
 
+type controlInput struct {
+	Pointer  bool `json:"pointer"`
+	Keyboard bool `json:"keyboard"`
+}
+
 type controlResponse struct {
 	Version int             `json:"version"`
 	ID      string          `json:"id"`
 	Type    string          `json:"type"`
 	OK      bool            `json:"ok"`
 	Quality *controlQuality `json:"quality,omitempty"`
+	Input   *controlInput   `json:"input,omitempty"`
 	Error   *protocolError  `json:"error,omitempty"`
+}
+
+type inputRequest struct {
+	Version        optionalInt     `json:"version"`
+	Sequence       optionalUint64  `json:"sequence"`
+	Type           optionalString  `json:"type"`
+	X              optionalFloat64 `json:"x"`
+	Y              optionalFloat64 `json:"y"`
+	DX             optionalFloat64 `json:"dx"`
+	DY             optionalFloat64 `json:"dy"`
+	Button         optionalString  `json:"button"`
+	Pressed        optionalBool    `json:"pressed"`
+	Horizontal     optionalFloat64 `json:"horizontal"`
+	Vertical       optionalFloat64 `json:"vertical"`
+	StopHorizontal optionalBool    `json:"stop_horizontal"`
+	StopVertical   optionalBool    `json:"stop_vertical"`
+	Keycode        optionalUint32  `json:"keycode"`
+}
+
+type inputResponse struct {
+	Version  int            `json:"version"`
+	Sequence *uint64        `json:"sequence,omitempty"`
+	Type     string         `json:"type"`
+	OK       bool           `json:"ok"`
+	Error    *protocolError `json:"error,omitempty"`
 }
 
 func decodeSignalRequest(data []byte) (signalRequest, error) {
@@ -174,6 +271,23 @@ func decodeSignalRequest(data []byte) (signalRequest, error) {
 
 func decodeControlRequest(data []byte) (controlRequest, error) {
 	var request controlRequest
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return request, err
+	}
+	var trailing struct{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return request, errors.New("multiple JSON values are not allowed")
+		}
+		return request, err
+	}
+	return request, nil
+}
+
+func decodeInputRequest(data []byte) (inputRequest, error) {
+	var request inputRequest
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
@@ -230,7 +344,17 @@ func validateControlRequest(request controlRequest) *protocolError {
 			Message: "id must contain between 1 and 128 bytes",
 		}
 	}
-	if request.Type.Value != controlTypeQualitySet {
+	switch request.Type.Value {
+	case controlTypeInputAcquire, controlTypeInputRelease:
+		if request.Quality.Set {
+			return &protocolError{
+				Code:    "unexpected_field",
+				Message: "quality is not allowed for input lease requests",
+			}
+		}
+		return nil
+	case controlTypeQualitySet:
+	default:
 		return &protocolError{
 			Code:    "unsupported_type",
 			Message: fmt.Sprintf("control message type %q is not supported", request.Type.Value),
@@ -258,6 +382,161 @@ func validateControlRequest(request controlRequest) *protocolError {
 		}
 	}
 	return nil
+}
+
+func validateInputRequest(request inputRequest) (input.Event, *protocolError) {
+	if !request.Version.Set {
+		return input.Event{}, &protocolError{Code: "missing_field", Message: "version is required"}
+	}
+	if !request.Sequence.Set {
+		return input.Event{}, &protocolError{Code: "missing_field", Message: "sequence is required"}
+	}
+	if !request.Type.Set {
+		return input.Event{}, &protocolError{Code: "missing_field", Message: "type is required"}
+	}
+	if request.Version.Value != inputVersion {
+		return input.Event{}, &protocolError{
+			Code:    "unsupported_version",
+			Message: fmt.Sprintf("input protocol version %d is not supported", request.Version.Value),
+		}
+	}
+	if request.Sequence.Value == 0 {
+		return input.Event{}, &protocolError{
+			Code:    "invalid_sequence",
+			Message: "sequence must be greater than zero",
+		}
+	}
+
+	event := input.Event{Sequence: request.Sequence.Value}
+	switch request.Type.Value {
+	case inputTypePointerAbsolute:
+		if !request.X.Set || !request.Y.Set {
+			return input.Event{}, &protocolError{Code: "missing_field", Message: "x and y are required"}
+		}
+		if hasInputFields(request, "x", "y") {
+			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "absolute pointer motion contains unrelated fields"}
+		}
+		if !finite(request.X.Value) || !finite(request.Y.Value) ||
+			request.X.Value < 0 || request.X.Value > 1 ||
+			request.Y.Value < 0 || request.Y.Value > 1 {
+			return input.Event{}, &protocolError{Code: "invalid_pointer", Message: "x and y must be finite numbers between 0 and 1"}
+		}
+		event.Type = input.EventPointerAbsolute
+		event.X = request.X.Value
+		event.Y = request.Y.Value
+	case inputTypePointerRelative:
+		if !request.DX.Set || !request.DY.Set {
+			return input.Event{}, &protocolError{Code: "missing_field", Message: "dx and dy are required"}
+		}
+		if hasInputFields(request, "dx", "dy") {
+			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "relative pointer motion contains unrelated fields"}
+		}
+		if !finite(request.DX.Value) || !finite(request.DY.Value) {
+			return input.Event{}, &protocolError{Code: "invalid_pointer", Message: "dx and dy must be finite numbers"}
+		}
+		event.Type = input.EventPointerRelative
+		event.DX = request.DX.Value
+		event.DY = request.DY.Value
+	case inputTypePointerButton:
+		if !request.Button.Set || !request.Pressed.Set {
+			return input.Event{}, &protocolError{Code: "missing_field", Message: "button and pressed are required"}
+		}
+		if hasInputFields(request, "button", "pressed") {
+			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "pointer button contains unrelated fields"}
+		}
+		buttons := map[string]uint32{
+			"primary":   0x110,
+			"secondary": 0x111,
+			"middle":    0x112,
+			"forward":   0x115,
+			"back":      0x116,
+		}
+		code, ok := buttons[request.Button.Value]
+		if !ok {
+			return input.Event{}, &protocolError{
+				Code:    "invalid_button",
+				Message: "button must be primary, middle, secondary, back, or forward",
+			}
+		}
+		event.Type = input.EventPointerButton
+		event.ButtonCode = code
+		event.Pressed = request.Pressed.Value
+	case inputTypePointerScroll:
+		if !request.Horizontal.Set ||
+			!request.Vertical.Set ||
+			!request.StopHorizontal.Set ||
+			!request.StopVertical.Set {
+			return input.Event{}, &protocolError{
+				Code:    "missing_field",
+				Message: "horizontal, vertical, stop_horizontal, and stop_vertical are required",
+			}
+		}
+		if hasInputFields(request, "horizontal", "vertical", "stop_horizontal", "stop_vertical") {
+			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "pointer scroll contains unrelated fields"}
+		}
+		if !finite(request.Horizontal.Value) || !finite(request.Vertical.Value) {
+			return input.Event{}, &protocolError{Code: "invalid_scroll", Message: "horizontal and vertical must be finite numbers"}
+		}
+		if request.Horizontal.Value == 0 &&
+			request.Vertical.Value == 0 &&
+			!request.StopHorizontal.Value &&
+			!request.StopVertical.Value {
+			return input.Event{}, &protocolError{Code: "invalid_scroll", Message: "scroll requires a delta or an axis stop"}
+		}
+		event.Type = input.EventPointerScroll
+		event.Horizontal = request.Horizontal.Value
+		event.Vertical = request.Vertical.Value
+		event.StopHorizontal = request.StopHorizontal.Value
+		event.StopVertical = request.StopVertical.Value
+	case inputTypeKeyboardKey:
+		if !request.Keycode.Set || !request.Pressed.Set {
+			return input.Event{}, &protocolError{Code: "missing_field", Message: "keycode and pressed are required"}
+		}
+		if hasInputFields(request, "keycode", "pressed") {
+			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "keyboard key contains unrelated fields"}
+		}
+		if request.Keycode.Value < 1 || request.Keycode.Value > 0x2ff {
+			return input.Event{}, &protocolError{Code: "invalid_keycode", Message: "keycode must be a Linux evdev code between 1 and 767"}
+		}
+		event.Type = input.EventKeyboardKey
+		event.Keycode = request.Keycode.Value
+		event.Pressed = request.Pressed.Value
+	default:
+		return input.Event{}, &protocolError{
+			Code:    "unsupported_type",
+			Message: fmt.Sprintf("input message type %q is not supported", request.Type.Value),
+		}
+	}
+	return event, nil
+}
+
+func hasInputFields(request inputRequest, allowed ...string) bool {
+	fields := map[string]bool{
+		"x":               request.X.Set,
+		"y":               request.Y.Set,
+		"dx":              request.DX.Set,
+		"dy":              request.DY.Set,
+		"button":          request.Button.Set,
+		"pressed":         request.Pressed.Set,
+		"horizontal":      request.Horizontal.Set,
+		"vertical":        request.Vertical.Set,
+		"stop_horizontal": request.StopHorizontal.Set,
+		"stop_vertical":   request.StopVertical.Set,
+		"keycode":         request.Keycode.Set,
+	}
+	for _, name := range allowed {
+		delete(fields, name)
+	}
+	for _, set := range fields {
+		if set {
+			return true
+		}
+	}
+	return false
+}
+
+func finite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func validateH264Offer(raw string) error {

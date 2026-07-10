@@ -57,6 +57,10 @@ func newServeCommand() *cobra.Command {
 	flags.Int("video-keyframe-interval", defaults.Video.Tuning.KeyframeInterval, "maximum frames between keyframes")
 	flags.Int("video-vp8-cpu-used", defaults.Video.Tuning.VP8CPUUsed, "VP8 speed setting from 0 to 16")
 	flags.String("video-h264-speed-preset", defaults.Video.Tuning.H264SpeedPreset, "x264 software speed preset")
+	flags.Bool("input-enabled", defaults.Input.Enabled, "request remote pointer and keyboard input")
+	flags.Bool("input-pointer", defaults.Input.Pointer, "enable remote pointer input")
+	flags.Bool("input-keyboard", defaults.Input.Keyboard, "enable remote keyboard input")
+	flags.Int("input-queue-size", defaults.Input.QueueSize, "bounded remote input event queue size")
 	flags.String("webrtc-signaling-path", defaults.WebRTC.SignalingPath, "WebSocket signaling path")
 	flags.Int("webrtc-max-peers", defaults.WebRTC.MaxPeers, "maximum concurrent WebRTC peers")
 	flags.StringSlice("webrtc-ice-server", defaults.WebRTC.ICEServers, "ICE server URL; may be repeated")
@@ -92,6 +96,10 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("video.tuning.keyframe_interval", defaults.Video.Tuning.KeyframeInterval)
 	v.SetDefault("video.tuning.vp8_cpu_used", defaults.Video.Tuning.VP8CPUUsed)
 	v.SetDefault("video.tuning.h264_speed_preset", defaults.Video.Tuning.H264SpeedPreset)
+	v.SetDefault("input.enabled", defaults.Input.Enabled)
+	v.SetDefault("input.pointer", defaults.Input.Pointer)
+	v.SetDefault("input.keyboard", defaults.Input.Keyboard)
+	v.SetDefault("input.queue_size", defaults.Input.QueueSize)
 	v.SetDefault("webrtc.signaling_path", defaults.WebRTC.SignalingPath)
 	v.SetDefault("webrtc.max_peers", defaults.WebRTC.MaxPeers)
 	v.SetDefault("webrtc.ice_servers", defaults.WebRTC.ICEServers)
@@ -117,6 +125,10 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video.tuning.keyframe_interval",
 		"video.tuning.vp8_cpu_used",
 		"video.tuning.h264_speed_preset",
+		"input.enabled",
+		"input.pointer",
+		"input.keyboard",
+		"input.queue_size",
 		"webrtc.signaling_path",
 		"webrtc.max_peers",
 		"webrtc.ice_servers",
@@ -147,6 +159,10 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video-keyframe-interval": "video.tuning.keyframe_interval",
 		"video-vp8-cpu-used":      "video.tuning.vp8_cpu_used",
 		"video-h264-speed-preset": "video.tuning.h264_speed_preset",
+		"input-enabled":           "input.enabled",
+		"input-pointer":           "input.pointer",
+		"input-keyboard":          "input.keyboard",
+		"input-queue-size":        "input.queue_size",
 		"webrtc-signaling-path":   "webrtc.signaling_path",
 		"webrtc-max-peers":        "webrtc.max_peers",
 		"webrtc-ice-server":       "webrtc.ice_servers",
