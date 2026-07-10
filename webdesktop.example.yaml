@@ -5,3 +5,17 @@ server:
 logging:
   level: info
   format: json
+
+video:
+  source: monitor
+  cursor_mode: embedded
+  codec: vp8
+  width: 1920
+  height: 1080
+  framerate: 30
+  bitrate_kbps: 4000
+  tuning:
+    threads: 4
+    keyframe_interval: 60
+    vp8_cpu_used: 8
+    h264_speed_preset: veryfast
