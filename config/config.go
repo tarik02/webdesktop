@@ -4,9 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
+	"path"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/pion/stun/v3"
+	"github.com/tarik02/webdesktop/media"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -28,6 +33,7 @@ type Config struct {
 	Server  Server  `mapstructure:"server" yaml:"server"`
 	Logging Logging `mapstructure:"logging" yaml:"logging"`
 	Video   Video   `mapstructure:"video" yaml:"video"`
+	WebRTC  WebRTC  `mapstructure:"webrtc" yaml:"webrtc"`
 }
 
 // Server contains HTTP server settings.
@@ -62,6 +68,18 @@ type VideoTuning struct {
 	H264SpeedPreset  string `mapstructure:"h264_speed_preset" yaml:"h264_speed_preset"`
 }
 
+// WebRTC contains static peer transport and signaling settings.
+type WebRTC struct {
+	SignalingPath  string   `mapstructure:"signaling_path" yaml:"signaling_path"`
+	MaxPeers       int      `mapstructure:"max_peers" yaml:"max_peers"`
+	ICEServers     []string `mapstructure:"ice_servers" yaml:"ice_servers"`
+	ICEUsername    string   `mapstructure:"ice_username" yaml:"ice_username"`
+	ICECredential  string   `mapstructure:"ice_credential" yaml:"ice_credential"`
+	UDPPortMin     int      `mapstructure:"udp_port_min" yaml:"udp_port_min"`
+	UDPPortMax     int      `mapstructure:"udp_port_max" yaml:"udp_port_max"`
+	AllowedOrigins []string `mapstructure:"allowed_origins" yaml:"allowed_origins"`
+}
+
 // Defaults returns the built-in service configuration.
 func Defaults() Config {
 	return Config{
@@ -87,6 +105,12 @@ func Defaults() Config {
 				VP8CPUUsed:       8,
 				H264SpeedPreset:  "veryfast",
 			},
+		},
+		WebRTC: WebRTC{
+			SignalingPath:  "/webrtc",
+			MaxPeers:       2,
+			ICEServers:     []string{},
+			AllowedOrigins: []string{},
 		},
 	}
 }
@@ -145,6 +169,15 @@ func (cfg Config) Validate() error {
 	if cfg.Video.BitrateKbps < 100 || cfg.Video.BitrateKbps > 100000 {
 		errs = append(errs, errors.New("video.bitrate_kbps must be between 100 and 100000"))
 	}
+	if cfg.Video.Codec == VideoCodecH264 {
+		errs = append(errs, media.ValidateH264Level4(media.Quality{
+			Codec:       cfg.Video.Codec,
+			Width:       cfg.Video.Width,
+			Height:      cfg.Video.Height,
+			Framerate:   cfg.Video.Framerate,
+			BitrateKbps: cfg.Video.BitrateKbps,
+		}))
+	}
 	if cfg.Video.Tuning.Threads < 1 || cfg.Video.Tuning.Threads > 64 {
 		errs = append(errs, errors.New("video.tuning.threads must be between 1 and 64"))
 	}
@@ -159,6 +192,61 @@ func (cfg Config) Validate() error {
 	case "ultrafast", "superfast", "veryfast", "faster", "fast", "medium":
 	default:
 		errs = append(errs, errors.New("video.tuning.h264_speed_preset must be ultrafast, superfast, veryfast, faster, fast, or medium"))
+	}
+
+	if cfg.WebRTC.SignalingPath == "" ||
+		!strings.HasPrefix(cfg.WebRTC.SignalingPath, "/") ||
+		path.Clean(cfg.WebRTC.SignalingPath) != cfg.WebRTC.SignalingPath ||
+		cfg.WebRTC.SignalingPath == "/" {
+		errs = append(errs, errors.New("webrtc.signaling_path must be a clean absolute path below /"))
+	}
+	if cfg.WebRTC.SignalingPath == "/healthz" {
+		errs = append(errs, errors.New("webrtc.signaling_path must not replace /healthz"))
+	}
+	if cfg.WebRTC.MaxPeers < 1 || cfg.WebRTC.MaxPeers > 64 {
+		errs = append(errs, errors.New("webrtc.max_peers must be between 1 and 64"))
+	}
+	if (cfg.WebRTC.ICEUsername == "") != (cfg.WebRTC.ICECredential == "") {
+		errs = append(errs, errors.New("webrtc.ice_username and webrtc.ice_credential must both be set or both be empty"))
+	}
+	if len(cfg.WebRTC.ICEServers) == 0 && cfg.WebRTC.ICEUsername != "" {
+		errs = append(errs, errors.New("webrtc ICE credentials require at least one ICE server"))
+	}
+	for _, server := range cfg.WebRTC.ICEServers {
+		uri, err := stun.ParseURI(server)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("webrtc.ice_servers contains invalid URL %q: %w", server, err))
+			continue
+		}
+		switch uri.Scheme {
+		case stun.SchemeTypeTURN, stun.SchemeTypeTURNS:
+			if cfg.WebRTC.ICEUsername == "" {
+				errs = append(errs, fmt.Errorf("webrtc.ice_servers TURN URL %q requires ICE credentials", server))
+			}
+		}
+	}
+	if (cfg.WebRTC.UDPPortMin == 0) != (cfg.WebRTC.UDPPortMax == 0) {
+		errs = append(errs, errors.New("webrtc.udp_port_min and webrtc.udp_port_max must both be set or both be zero"))
+	} else if cfg.WebRTC.UDPPortMin != 0 &&
+		(cfg.WebRTC.UDPPortMin < 1 ||
+			cfg.WebRTC.UDPPortMax > 65535 ||
+			cfg.WebRTC.UDPPortMax < cfg.WebRTC.UDPPortMin) {
+		errs = append(errs, errors.New("webrtc UDP port range must be between 1 and 65535 with min not greater than max"))
+	}
+	for _, origin := range cfg.WebRTC.AllowedOrigins {
+		if origin == "*" {
+			continue
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil ||
+			(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+			parsed.Host == "" ||
+			parsed.User != nil ||
+			parsed.Path != "" ||
+			parsed.RawQuery != "" ||
+			parsed.Fragment != "" {
+			errs = append(errs, fmt.Errorf("webrtc.allowed_origins contains invalid origin %q", origin))
+		}
 	}
 
 	return errors.Join(errs...)

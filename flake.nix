@@ -1,5 +1,5 @@
 {
-  description = "webdesktop KDE Wayland capture service";
+  description = "webdesktop KDE Wayland streaming service";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -46,7 +46,7 @@
             inherit version;
 
             src = pkgs.lib.cleanSource ./.;
-            vendorHash = "sha256-o13bGT7KNmB+VXU5qMkGGnZlkJhmnHdzgTscqKmjJhY=";
+            vendorHash = "sha256-x6H1qbLoOzRzpsS3yPQli8I7uUzQ58omr5oXzWxfTtI=";
             subPackages = [ "cmd/webdesktop" ];
 
             nativeBuildInputs = mediaNativeBuildInputs ++ [ pkgs.makeWrapper ];
@@ -64,7 +64,7 @@
             '';
 
             meta = with pkgs.lib; {
-              description = "KDE Plasma Wayland desktop capture service";
+              description = "KDE Plasma Wayland desktop streaming service";
               mainProgram = "webdesktop";
               platforms = platforms.linux;
             };

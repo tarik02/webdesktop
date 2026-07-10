@@ -16,6 +16,14 @@ import (
 const (
 	CodecVP8  = "vp8"
 	CodecH264 = "h264"
+
+	H264SDPProfileLevelID          = "42e028"
+	H264EncoderProfileLevelID      = "42c028"
+	H264Level                      = "4"
+	H264MaxMacroblocksPerDimension = 256
+	H264MaxMacroblocksPerFrame     = 8192
+	H264MaxMacroblocksPerSecond    = 245760
+	H264MaxLevelBitrateKbps        = 20000
 )
 
 // Quality contains runtime-adjustable video settings.
@@ -42,7 +50,7 @@ type Config struct {
 	Tuning  Tuning
 }
 
-// Sample is one encoded video frame ready for a future transport.
+// Sample is one encoded video frame ready for transport.
 type Sample struct {
 	Data     []byte
 	Codec    string
@@ -103,7 +111,60 @@ func (quality Quality) Validate() error {
 	if quality.BitrateKbps < 100 || quality.BitrateKbps > 100000 {
 		errs = append(errs, errors.New("video bitrate must be between 100 and 100000 Kbit/s"))
 	}
+	if quality.Codec == CodecH264 {
+		errs = append(errs, ValidateH264Level4(quality))
+	}
 
+	return errors.Join(errs...)
+}
+
+// ValidateH264Level4 checks constrained-baseline Level 4.0 limits.
+func ValidateH264Level4(quality Quality) error {
+	widthMacroblocks := (quality.Width + 15) / 16
+	heightMacroblocks := (quality.Height + 15) / 16
+	macroblocks := widthMacroblocks * heightMacroblocks
+	var errs []error
+	if widthMacroblocks > H264MaxMacroblocksPerDimension {
+		errs = append(errs, fmt.Errorf(
+			"H.264 Level 4.0 width must not exceed %d macroblocks; width %d requires %d",
+			H264MaxMacroblocksPerDimension,
+			quality.Width,
+			widthMacroblocks,
+		))
+	}
+	if heightMacroblocks > H264MaxMacroblocksPerDimension {
+		errs = append(errs, fmt.Errorf(
+			"H.264 Level 4.0 height must not exceed %d macroblocks; height %d requires %d",
+			H264MaxMacroblocksPerDimension,
+			quality.Height,
+			heightMacroblocks,
+		))
+	}
+	if macroblocks > H264MaxMacroblocksPerFrame {
+		errs = append(errs, fmt.Errorf(
+			"H.264 Level 4.0 supports at most %d macroblocks per frame; %dx%d requires %d",
+			H264MaxMacroblocksPerFrame,
+			quality.Width,
+			quality.Height,
+			macroblocks,
+		))
+	}
+	if macroblocks*quality.Framerate > H264MaxMacroblocksPerSecond {
+		errs = append(errs, fmt.Errorf(
+			"H.264 Level 4.0 supports at most %d macroblocks per second; %dx%d at %d fps requires %d",
+			H264MaxMacroblocksPerSecond,
+			quality.Width,
+			quality.Height,
+			quality.Framerate,
+			macroblocks*quality.Framerate,
+		))
+	}
+	if quality.BitrateKbps > H264MaxLevelBitrateKbps {
+		errs = append(errs, fmt.Errorf(
+			"H.264 Level 4.0 bitrate must not exceed %d Kbit/s",
+			H264MaxLevelBitrateKbps,
+		))
+	}
 	return errors.Join(errs...)
 }
 
@@ -342,6 +403,23 @@ func (s *Service) UpdateQuality(quality Quality) error {
 		zap.Int("framerate", quality.Framerate),
 		zap.Int("bitrate_kbps", quality.BitrateKbps),
 	)
+	return nil
+}
+
+// RequestKeyframe asks the active encoder to emit a new independently decodable frame.
+func (s *Service) RequestKeyframe() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.running || s.pipeline == nil {
+		return errors.New("media service is not running")
+	}
+	if s.pipelineErr != nil {
+		return s.pipelineErr
+	}
+	if err := s.pipeline.RequestKeyframe(); err != nil {
+		return fmt.Errorf("request encoder keyframe: %w", err)
+	}
 	return nil
 }
 

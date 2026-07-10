@@ -17,13 +17,14 @@ import (
 const pipelineBusPollInterval = 100 * time.Millisecond
 
 type videoPipeline struct {
-	pipeline *gst.Pipeline
-	elements []*gst.Element
-	stream   *capture.Stream
-	encoder  *gst.Element
-	codec    string
-	emit     func(Sample)
-	logger   *zap.Logger
+	pipeline       *gst.Pipeline
+	elements       []*gst.Element
+	stream         *capture.Stream
+	encoder        *gst.Element
+	keyframeTarget *gst.Element
+	codec          string
+	emit           func(Sample)
+	logger         *zap.Logger
 
 	stop        chan struct{}
 	monitorDone chan struct{}
@@ -114,7 +115,7 @@ func newVideoPipeline(
 	encodedCapsString := "video/x-vp8"
 	if quality.Codec == CodecH264 {
 		encoderFactory = "x264enc"
-		encodedCapsString = "video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline"
+		encodedCapsString = "video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)" + H264Level
 	}
 
 	encoder, err := gst.NewElementWithName(encoderFactory, "video-encoder")
@@ -231,14 +232,15 @@ func newVideoPipeline(
 			encodedFilter,
 			sink.Element,
 		},
-		stream:      stream,
-		encoder:     encoder,
-		codec:       quality.Codec,
-		emit:        emit,
-		logger:      logger,
-		stop:        make(chan struct{}),
-		monitorDone: make(chan struct{}),
-		done:        make(chan struct{}),
+		stream:         stream,
+		encoder:        encoder,
+		keyframeTarget: sink.Element,
+		codec:          quality.Codec,
+		emit:           emit,
+		logger:         logger,
+		stop:           make(chan struct{}),
+		monitorDone:    make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 	sink.SetCallbacks(&gstapp.SinkCallbacks{
 		NewSampleFunc: result.handleSample,
@@ -325,6 +327,13 @@ func (p *videoPipeline) SetBitrate(bitrateKbps int) error {
 	default:
 		return fmt.Errorf("unsupported live bitrate update for codec %q", p.codec)
 	}
+}
+
+func (p *videoPipeline) RequestKeyframe() error {
+	if !requestGStreamerKeyframe(p.keyframeTarget) {
+		return errors.New("GStreamer rejected the force-key-unit event")
+	}
+	return nil
 }
 
 func (p *videoPipeline) Done() <-chan struct{} {

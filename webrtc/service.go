@@ -1,0 +1,434 @@
+// Package webrtc provides shared video transport and WebSocket signaling.
+package webrtc
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/pion/interceptor"
+	"github.com/pion/stun/v3"
+	pion "github.com/pion/webrtc/v4"
+	"github.com/tarik02/webdesktop/media"
+	"go.uber.org/zap"
+)
+
+const (
+	defaultSignalingWriteTimeout = 5 * time.Second
+	servicePeerCloseTimeout      = 4 * time.Second
+	vp8PayloadType               = 96
+	h264PayloadType              = 102
+)
+
+var (
+	errPeerLimit          = errors.New("maximum peer count reached")
+	errServiceUnavailable = errors.New("WebRTC service is unavailable")
+)
+
+// Media is the capture API required by the WebRTC transport.
+type Media interface {
+	Samples() <-chan media.Sample
+	Quality() media.Quality
+	UpdateQuality(media.Quality) error
+	RequestKeyframe() error
+}
+
+// Config contains static WebRTC and signaling settings.
+type Config struct {
+	Codec          string
+	ICEServers     []string
+	ICEUsername    string
+	ICECredential  string
+	UDPPortMin     uint16
+	UDPPortMax     uint16
+	MaxPeers       int
+	AllowedOrigins []string
+}
+
+// Validate checks the implemented transport settings.
+func (cfg Config) Validate() error {
+	var errs []error
+
+	switch cfg.Codec {
+	case media.CodecVP8, media.CodecH264:
+	default:
+		errs = append(errs, errors.New("WebRTC codec must be vp8 or h264"))
+	}
+	if cfg.MaxPeers < 1 || cfg.MaxPeers > 64 {
+		errs = append(errs, errors.New("WebRTC max peers must be between 1 and 64"))
+	}
+	if (cfg.ICEUsername == "") != (cfg.ICECredential == "") {
+		errs = append(errs, errors.New("ICE username and credential must both be set or both be empty"))
+	}
+	if len(cfg.ICEServers) == 0 && cfg.ICEUsername != "" {
+		errs = append(errs, errors.New("ICE credentials require at least one ICE server"))
+	}
+	for _, server := range cfg.ICEServers {
+		uri, err := stun.ParseURI(server)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("invalid ICE server URL %q: %w", server, err))
+			continue
+		}
+		switch uri.Scheme {
+		case stun.SchemeTypeTURN, stun.SchemeTypeTURNS:
+			if cfg.ICEUsername == "" {
+				errs = append(errs, fmt.Errorf("TURN server %q requires ICE credentials", server))
+			}
+		}
+	}
+	if (cfg.UDPPortMin == 0) != (cfg.UDPPortMax == 0) || cfg.UDPPortMax < cfg.UDPPortMin {
+		errs = append(errs, errors.New("ICE UDP port range is invalid"))
+	}
+	for _, origin := range cfg.AllowedOrigins {
+		if origin == "*" {
+			continue
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil ||
+			(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+			parsed.Host == "" ||
+			parsed.User != nil ||
+			parsed.Path != "" ||
+			parsed.RawQuery != "" ||
+			parsed.Fragment != "" {
+			errs = append(errs, fmt.Errorf("invalid allowed WebSocket origin %q", origin))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// Service fans one encoded media source out to active peer connections.
+type Service struct {
+	cfg        Config
+	source     Media
+	logger     *zap.Logger
+	capability pion.RTPCodecCapability
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	runMu   sync.Mutex
+	started bool
+
+	peersMu sync.Mutex
+	closed  bool
+	nextID  uint64
+	count   int
+	peers   map[*peer]struct{}
+
+	qualityMu        sync.Mutex
+	keyframeRequests chan string
+}
+
+// New constructs a reusable WebRTC service without opening listeners.
+func New(cfg Config, source Media, logger *zap.Logger) (*Service, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if source == nil {
+		return nil, errors.New("WebRTC media source is required")
+	}
+	if logger == nil {
+		return nil, errors.New("WebRTC logger is required")
+	}
+	quality := source.Quality()
+	if quality.Codec != cfg.Codec {
+		return nil, fmt.Errorf("media quality codec %q does not match WebRTC codec %q", quality.Codec, cfg.Codec)
+	}
+	if cfg.Codec == media.CodecH264 {
+		if err := media.ValidateH264Level4(quality); err != nil {
+			return nil, fmt.Errorf("validate H.264 WebRTC quality: %w", err)
+		}
+	}
+
+	capability := pion.RTPCodecCapability{
+		MimeType:  pion.MimeTypeVP8,
+		ClockRate: 90000,
+		RTCPFeedback: []pion.RTCPFeedback{
+			{Type: pion.TypeRTCPFBNACK},
+			{Type: pion.TypeRTCPFBNACK, Parameter: "pli"},
+			{Type: pion.TypeRTCPFBCCM, Parameter: "fir"},
+		},
+	}
+	if cfg.Codec == media.CodecH264 {
+		capability.MimeType = pion.MimeTypeH264
+		capability.SDPFmtpLine = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=" + media.H264SDPProfileLevelID
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Service{
+		cfg:              cfg,
+		source:           source,
+		logger:           logger,
+		capability:       capability,
+		ctx:              ctx,
+		cancel:           cancel,
+		peers:            make(map[*peer]struct{}),
+		keyframeRequests: make(chan string, 1),
+	}, nil
+}
+
+// Handler returns the signaling handler for mounting behind application middleware.
+func (s *Service) Handler() gin.HandlerFunc {
+	upgrader := websocket.Upgrader{
+		HandshakeTimeout: defaultSignalingWriteTimeout,
+		CheckOrigin:      s.originAllowed,
+	}
+
+	return func(c *gin.Context) {
+		connection, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			s.logger.Debug("WebSocket upgrade rejected", zap.Error(err))
+			return
+		}
+
+		peer, err := s.newPeer(connection)
+		if err != nil {
+			code := "internal_error"
+			status := websocket.CloseInternalServerErr
+			if errors.Is(err, errPeerLimit) {
+				code = "peer_limit"
+				status = websocket.CloseTryAgainLater
+			} else if errors.Is(err, errServiceUnavailable) {
+				code = "service_unavailable"
+				status = websocket.CloseGoingAway
+			}
+			_ = connection.SetWriteDeadline(time.Now().Add(defaultSignalingWriteTimeout))
+			_ = connection.WriteJSON(signalResponse{
+				Version: signalingVersion,
+				Type:    signalTypeError,
+				Error: &protocolError{
+					Code:    code,
+					Message: err.Error(),
+				},
+			})
+			_ = connection.WriteControl(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(status, err.Error()),
+				time.Now().Add(defaultSignalingWriteTimeout),
+			)
+			_ = connection.Close()
+			return
+		}
+
+		peer.run(c.Request.Context())
+	}
+}
+
+// Run forwards encoded samples until the context ends or media stops.
+func (s *Service) Run(ctx context.Context) error {
+	s.runMu.Lock()
+	if s.started {
+		s.runMu.Unlock()
+		return errors.New("WebRTC service has already been run")
+	}
+	s.started = true
+	s.runMu.Unlock()
+
+	defer s.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-s.ctx.Done():
+			return nil
+		case reason := <-s.keyframeRequests:
+			if err := s.source.RequestKeyframe(); err != nil {
+				s.logger.Debug("keyframe request was not applied",
+					zap.String("reason", reason),
+					zap.Error(err),
+				)
+			}
+		case sample, ok := <-s.source.Samples():
+			if !ok {
+				if ctx.Err() != nil || s.ctx.Err() != nil {
+					return nil
+				}
+				return errors.New("media sample stream stopped")
+			}
+			if sample.Codec != s.cfg.Codec {
+				return fmt.Errorf("media sample codec %q does not match configured WebRTC codec %q", sample.Codec, s.cfg.Codec)
+			}
+			if sample.Duration <= 0 {
+				s.logger.Warn("dropping media sample without a positive duration")
+				continue
+			}
+			for _, peer := range s.peerSnapshot() {
+				peer.enqueueSample(sample)
+			}
+		}
+	}
+}
+
+// Close stops signaling and closes every active peer.
+func (s *Service) Close() {
+	s.peersMu.Lock()
+	if s.closed {
+		s.peersMu.Unlock()
+		return
+	}
+	s.closed = true
+	s.cancel()
+	peers := make([]*peer, 0, len(s.peers))
+	for peer := range s.peers {
+		peers = append(peers, peer)
+	}
+	s.peersMu.Unlock()
+
+	var wait sync.WaitGroup
+	wait.Add(len(peers))
+	for _, peer := range peers {
+		go func() {
+			defer wait.Done()
+			peer.closeWith(websocket.CloseGoingAway, "service stopping")
+		}()
+	}
+	closed := make(chan struct{})
+	go func() {
+		wait.Wait()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(servicePeerCloseTimeout):
+		s.logger.Warn("timed out closing WebRTC peers", zap.Int("peer_count", len(peers)))
+	}
+}
+
+// PeerCount returns the number of active and initializing peers.
+func (s *Service) PeerCount() int {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	return s.count
+}
+
+func (s *Service) newPeerConnection() (*pion.PeerConnection, error) {
+	mediaEngine := &pion.MediaEngine{}
+	payloadType := pion.PayloadType(vp8PayloadType)
+	if s.cfg.Codec == media.CodecH264 {
+		payloadType = h264PayloadType
+	}
+	if err := mediaEngine.RegisterCodec(pion.RTPCodecParameters{
+		RTPCodecCapability: s.capability,
+		PayloadType:        payloadType,
+	}, pion.RTPCodecTypeVideo); err != nil {
+		return nil, fmt.Errorf("register video codec: %w", err)
+	}
+
+	registry := &interceptor.Registry{}
+	if err := pion.RegisterDefaultInterceptors(mediaEngine, registry); err != nil {
+		return nil, fmt.Errorf("register WebRTC interceptors: %w", err)
+	}
+
+	var settings pion.SettingEngine
+	if s.cfg.UDPPortMin != 0 {
+		if err := settings.SetEphemeralUDPPortRange(s.cfg.UDPPortMin, s.cfg.UDPPortMax); err != nil {
+			return nil, fmt.Errorf("set ICE UDP port range: %w", err)
+		}
+	}
+
+	configuration := pion.Configuration{}
+	if len(s.cfg.ICEServers) > 0 {
+		iceServer := pion.ICEServer{
+			URLs: append([]string(nil), s.cfg.ICEServers...),
+		}
+		if s.cfg.ICEUsername != "" {
+			iceServer.Username = s.cfg.ICEUsername
+			iceServer.Credential = s.cfg.ICECredential
+			iceServer.CredentialType = pion.ICECredentialTypePassword
+		}
+		configuration.ICEServers = []pion.ICEServer{iceServer}
+	}
+
+	return pion.NewAPI(
+		pion.WithMediaEngine(mediaEngine),
+		pion.WithSettingEngine(settings),
+		pion.WithInterceptorRegistry(registry),
+	).NewPeerConnection(configuration)
+}
+
+func (s *Service) reservePeer() (uint64, error) {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+
+	if s.closed {
+		return 0, errServiceUnavailable
+	}
+	if s.count >= s.cfg.MaxPeers {
+		return 0, errPeerLimit
+	}
+	s.nextID++
+	s.count++
+	return s.nextID, nil
+}
+
+func (s *Service) registerPeer(peer *peer) error {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+
+	if s.closed {
+		s.count--
+		return errServiceUnavailable
+	}
+	s.peers[peer] = struct{}{}
+	return nil
+}
+
+func (s *Service) releaseReservation() {
+	s.peersMu.Lock()
+	s.count--
+	s.peersMu.Unlock()
+}
+
+func (s *Service) removePeer(peer *peer) {
+	s.peersMu.Lock()
+	if _, ok := s.peers[peer]; ok {
+		delete(s.peers, peer)
+		s.count--
+	}
+	s.peersMu.Unlock()
+}
+
+func (s *Service) peerSnapshot() []*peer {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	peers := make([]*peer, 0, len(s.peers))
+	for peer := range s.peers {
+		peers = append(peers, peer)
+	}
+	return peers
+}
+
+func (s *Service) requestKeyframe(reason string) {
+	select {
+	case s.keyframeRequests <- reason:
+	default:
+	}
+}
+
+func (s *Service) originAllowed(request *http.Request) bool {
+	origin := request.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	if len(s.cfg.AllowedOrigins) == 0 {
+		parsed, err := url.Parse(origin)
+		return err == nil &&
+			(parsed.Scheme == "http" || parsed.Scheme == "https") &&
+			parsed.Host == request.Host
+	}
+	for _, allowed := range s.cfg.AllowedOrigins {
+		if allowed == "*" || allowed == origin {
+			return true
+		}
+	}
+	return false
+}

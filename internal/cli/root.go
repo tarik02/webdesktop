@@ -13,7 +13,7 @@ func Execute() error {
 func newRootCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "webdesktop",
-		Short:         "KDE Wayland desktop capture service",
+		Short:         "KDE Wayland desktop streaming service",
 		Version:       version.Short(),
 		SilenceErrors: true,
 		SilenceUsage:  true,

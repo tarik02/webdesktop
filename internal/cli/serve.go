@@ -19,7 +19,7 @@ func newServeCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run the webdesktop capture service",
+		Short: "Run the webdesktop streaming service",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig(cmd, configFile)
@@ -57,6 +57,14 @@ func newServeCommand() *cobra.Command {
 	flags.Int("video-keyframe-interval", defaults.Video.Tuning.KeyframeInterval, "maximum frames between keyframes")
 	flags.Int("video-vp8-cpu-used", defaults.Video.Tuning.VP8CPUUsed, "VP8 speed setting from 0 to 16")
 	flags.String("video-h264-speed-preset", defaults.Video.Tuning.H264SpeedPreset, "x264 software speed preset")
+	flags.String("webrtc-signaling-path", defaults.WebRTC.SignalingPath, "WebSocket signaling path")
+	flags.Int("webrtc-max-peers", defaults.WebRTC.MaxPeers, "maximum concurrent WebRTC peers")
+	flags.StringSlice("webrtc-ice-server", defaults.WebRTC.ICEServers, "ICE server URL; may be repeated")
+	flags.String("webrtc-ice-username", defaults.WebRTC.ICEUsername, "ICE server username")
+	flags.String("webrtc-ice-credential", defaults.WebRTC.ICECredential, "ICE server credential")
+	flags.Int("webrtc-udp-port-min", defaults.WebRTC.UDPPortMin, "minimum ICE UDP port, or zero for the system range")
+	flags.Int("webrtc-udp-port-max", defaults.WebRTC.UDPPortMax, "maximum ICE UDP port, or zero for the system range")
+	flags.StringSlice("webrtc-allowed-origin", defaults.WebRTC.AllowedOrigins, "allowed WebSocket origin; may be repeated")
 
 	return cmd
 }
@@ -84,6 +92,14 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("video.tuning.keyframe_interval", defaults.Video.Tuning.KeyframeInterval)
 	v.SetDefault("video.tuning.vp8_cpu_used", defaults.Video.Tuning.VP8CPUUsed)
 	v.SetDefault("video.tuning.h264_speed_preset", defaults.Video.Tuning.H264SpeedPreset)
+	v.SetDefault("webrtc.signaling_path", defaults.WebRTC.SignalingPath)
+	v.SetDefault("webrtc.max_peers", defaults.WebRTC.MaxPeers)
+	v.SetDefault("webrtc.ice_servers", defaults.WebRTC.ICEServers)
+	v.SetDefault("webrtc.ice_username", defaults.WebRTC.ICEUsername)
+	v.SetDefault("webrtc.ice_credential", defaults.WebRTC.ICECredential)
+	v.SetDefault("webrtc.udp_port_min", defaults.WebRTC.UDPPortMin)
+	v.SetDefault("webrtc.udp_port_max", defaults.WebRTC.UDPPortMax)
+	v.SetDefault("webrtc.allowed_origins", defaults.WebRTC.AllowedOrigins)
 
 	for _, key := range []string{
 		"server.listen_address",
@@ -101,6 +117,14 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video.tuning.keyframe_interval",
 		"video.tuning.vp8_cpu_used",
 		"video.tuning.h264_speed_preset",
+		"webrtc.signaling_path",
+		"webrtc.max_peers",
+		"webrtc.ice_servers",
+		"webrtc.ice_username",
+		"webrtc.ice_credential",
+		"webrtc.udp_port_min",
+		"webrtc.udp_port_max",
+		"webrtc.allowed_origins",
 	} {
 		if err := v.BindEnv(key); err != nil {
 			return config.Config{}, fmt.Errorf("bind environment %s: %w", key, err)
@@ -123,6 +147,14 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video-keyframe-interval": "video.tuning.keyframe_interval",
 		"video-vp8-cpu-used":      "video.tuning.vp8_cpu_used",
 		"video-h264-speed-preset": "video.tuning.h264_speed_preset",
+		"webrtc-signaling-path":   "webrtc.signaling_path",
+		"webrtc-max-peers":        "webrtc.max_peers",
+		"webrtc-ice-server":       "webrtc.ice_servers",
+		"webrtc-ice-username":     "webrtc.ice_username",
+		"webrtc-ice-credential":   "webrtc.ice_credential",
+		"webrtc-udp-port-min":     "webrtc.udp_port_min",
+		"webrtc-udp-port-max":     "webrtc.udp_port_max",
+		"webrtc-allowed-origin":   "webrtc.allowed_origins",
 	}
 	for flagName, key := range flagBindings {
 		if err := v.BindPFlag(key, cmd.Flags().Lookup(flagName)); err != nil {

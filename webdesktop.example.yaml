@@ -19,3 +19,13 @@ video:
     keyframe_interval: 60
     vp8_cpu_used: 8
     h264_speed_preset: veryfast
+
+webrtc:
+  signaling_path: /webrtc
+  max_peers: 2
+  ice_servers: []
+  ice_username: ""
+  ice_credential: ""
+  udp_port_min: 0
+  udp_port_max: 0
+  allowed_origins: []

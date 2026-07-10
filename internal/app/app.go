@@ -11,6 +11,7 @@ import (
 	"github.com/tarik02/webdesktop/httpserver"
 	"github.com/tarik02/webdesktop/logging"
 	"github.com/tarik02/webdesktop/media"
+	rtc "github.com/tarik02/webdesktop/webrtc"
 	"go.uber.org/zap"
 )
 
@@ -19,6 +20,7 @@ type App struct {
 	logger *zap.Logger
 	server *httpserver.Server
 	media  *media.Service
+	webrtc *rtc.Service
 }
 
 // New constructs the application wiring.
@@ -29,12 +31,6 @@ func New(cfg config.Config) (*App, error) {
 	}
 
 	gin.SetMode(gin.ReleaseMode)
-
-	server, err := httpserver.New(cfg.Server, logger)
-	if err != nil {
-		_ = logger.Sync()
-		return nil, err
-	}
 
 	mediaService, err := media.New(media.Config{
 		Capture: capture.Config{
@@ -60,10 +56,35 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
+	webrtcService, err := rtc.New(rtc.Config{
+		Codec:          cfg.Video.Codec,
+		ICEServers:     cfg.WebRTC.ICEServers,
+		ICEUsername:    cfg.WebRTC.ICEUsername,
+		ICECredential:  cfg.WebRTC.ICECredential,
+		UDPPortMin:     uint16(cfg.WebRTC.UDPPortMin),
+		UDPPortMax:     uint16(cfg.WebRTC.UDPPortMax),
+		MaxPeers:       cfg.WebRTC.MaxPeers,
+		AllowedOrigins: cfg.WebRTC.AllowedOrigins,
+	}, mediaService, logger.Named("webrtc"))
+	if err != nil {
+		_ = logger.Sync()
+		return nil, err
+	}
+
+	server, err := httpserver.New(cfg.Server, logger, func(router *gin.Engine) {
+		router.GET(cfg.WebRTC.SignalingPath, webrtcService.Handler())
+	})
+	if err != nil {
+		webrtcService.Close()
+		_ = logger.Sync()
+		return nil, err
+	}
+
 	return &App{
 		logger: logger,
 		server: server,
 		media:  mediaService,
+		webrtc: webrtcService,
 	}, nil
 }
 
@@ -78,16 +99,19 @@ func (a *App) Serve(ctx context.Context) error {
 		component string
 		err       error
 	}
-	results := make(chan result, 2)
+	results := make(chan result, 3)
 	go func() {
 		results <- result{component: "http server", err: a.server.Serve(runCtx)}
 	}()
 	go func() {
 		results <- result{component: "media", err: a.media.Run(runCtx)}
 	}()
+	go func() {
+		results <- result{component: "WebRTC", err: a.webrtc.Run(runCtx)}
+	}()
 
 	var runErr error
-	for range 2 {
+	for range 3 {
 		result := <-results
 		if result.err != nil && runCtx.Err() != nil && errors.Is(result.err, context.Canceled) {
 			continue
@@ -110,5 +134,6 @@ func (a *App) Serve(ctx context.Context) error {
 
 // Close flushes buffered log entries.
 func (a *App) Close() {
+	a.webrtc.Close()
 	_ = a.logger.Sync()
 }

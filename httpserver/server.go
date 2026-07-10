@@ -23,7 +23,7 @@ type Server struct {
 }
 
 // New constructs an HTTP server without starting it.
-func New(cfg config.Server, logger *zap.Logger) (*Server, error) {
+func New(cfg config.Server, logger *zap.Logger, mount func(*gin.Engine)) (*Server, error) {
 	shutdownTimeout, err := cfg.ShutdownDuration()
 	if err != nil {
 		return nil, err
@@ -45,6 +45,7 @@ func New(cfg config.Server, logger *zap.Logger) (*Server, error) {
 			Status string `json:"status"`
 		}{Status: "ok"})
 	})
+	mount(router)
 
 	return &Server{
 		httpServer: &http.Server{
