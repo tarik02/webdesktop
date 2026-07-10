@@ -26,6 +26,8 @@ const (
 
 	VideoCodecVP8  = "vp8"
 	VideoCodecH264 = "h264"
+
+	AudioDefaultMonitor = media.DefaultAudioMonitor
 )
 
 // Config contains the resolved service configuration.
@@ -33,6 +35,7 @@ type Config struct {
 	Server  Server  `mapstructure:"server" yaml:"server"`
 	Logging Logging `mapstructure:"logging" yaml:"logging"`
 	Video   Video   `mapstructure:"video" yaml:"video"`
+	Audio   Audio   `mapstructure:"audio" yaml:"audio"`
 	Input   Input   `mapstructure:"input" yaml:"input"`
 	WebRTC  WebRTC  `mapstructure:"webrtc" yaml:"webrtc"`
 }
@@ -67,6 +70,13 @@ type VideoTuning struct {
 	KeyframeInterval int    `mapstructure:"keyframe_interval" yaml:"keyframe_interval"`
 	VP8CPUUsed       int    `mapstructure:"vp8_cpu_used" yaml:"vp8_cpu_used"`
 	H264SpeedPreset  string `mapstructure:"h264_speed_preset" yaml:"h264_speed_preset"`
+}
+
+// Audio contains optional desktop audio capture settings.
+type Audio struct {
+	Enabled     bool   `mapstructure:"enabled" yaml:"enabled"`
+	Device      string `mapstructure:"device" yaml:"device"`
+	BitrateKbps int    `mapstructure:"bitrate_kbps" yaml:"bitrate_kbps"`
 }
 
 // Input contains static remote input settings.
@@ -114,6 +124,11 @@ func Defaults() Config {
 				VP8CPUUsed:       8,
 				H264SpeedPreset:  "veryfast",
 			},
+		},
+		Audio: Audio{
+			Enabled:     false,
+			Device:      AudioDefaultMonitor,
+			BitrateKbps: 128,
 		},
 		Input: Input{
 			Enabled:   true,
@@ -207,6 +222,13 @@ func (cfg Config) Validate() error {
 	case "ultrafast", "superfast", "veryfast", "faster", "fast", "medium":
 	default:
 		errs = append(errs, errors.New("video.tuning.h264_speed_preset must be ultrafast, superfast, veryfast, faster, fast, or medium"))
+	}
+
+	if cfg.Audio.Device != AudioDefaultMonitor && !strings.HasSuffix(cfg.Audio.Device, ".monitor") {
+		errs = append(errs, errors.New("audio.device must be @DEFAULT_MONITOR@ or a PulseAudio monitor source ending in .monitor"))
+	}
+	if cfg.Audio.BitrateKbps < 6 || cfg.Audio.BitrateKbps > 510 {
+		errs = append(errs, errors.New("audio.bitrate_kbps must be between 6 and 510"))
 	}
 
 	if cfg.Input.Enabled && !cfg.Input.Pointer && !cfg.Input.Keyboard {

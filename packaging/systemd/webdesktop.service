@@ -1,0 +1,15 @@
+[Unit]
+Description=Webdesktop remote desktop service
+Requisite=graphical-session.target
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@webdesktop@/bin/webdesktop serve --config %h/.config/webdesktop/config.yaml
+Restart=no
+TimeoutStopSec=15s
+UMask=0077
+
+[Install]
+WantedBy=graphical-session.target

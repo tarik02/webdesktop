@@ -40,15 +40,14 @@
             pkgs.gst_all_1.gst-plugins-base
             pkgs.libei
           ];
-        in
-        {
-          packages.default = buildGoModule {
+          webdesktop = buildGoModule {
             pname = "webdesktop";
             inherit version;
 
             src = pkgs.lib.cleanSource ./.;
             vendorHash = "sha256-x6H1qbLoOzRzpsS3yPQli8I7uUzQ58omr5oXzWxfTtI=";
             subPackages = [ "cmd/webdesktop" ];
+            doCheck = false;
 
             nativeBuildInputs = mediaNativeBuildInputs ++ [ pkgs.makeWrapper ];
             buildInputs = mediaBuildInputs;
@@ -61,7 +60,15 @@
 
             postInstall = ''
               wrapProgram $out/bin/webdesktop \
-                --set GST_PLUGIN_SYSTEM_PATH_1_0 "${gstPluginPath}"
+                --set GST_PLUGIN_SYSTEM_PATH_1_0 "${gstPluginPath}" \
+                --run 'export GST_REGISTRY_1_0="''${XDG_RUNTIME_DIR:-/tmp}/webdesktop-gstreamer-${pkgs.gst_all_1.gstreamer.version}-''${UID}.bin"'
+
+              mkdir -p $out/lib/systemd/user $out/share/webdesktop
+              substitute ${./packaging/systemd/webdesktop.service} \
+                $out/lib/systemd/user/webdesktop.service \
+                --replace-fail '@webdesktop@' "$out"
+              install -m 0644 ${./webdesktop.example.yaml} \
+                $out/share/webdesktop/config.example.yaml
             '';
 
             meta = with pkgs.lib; {
@@ -70,10 +77,57 @@
               platforms = platforms.linux;
             };
           };
+        in
+        {
+          packages.default = webdesktop;
 
           apps.default = {
             type = "app";
-            program = "${self.packages.${system}.default}/bin/webdesktop";
+            program = "${webdesktop}/bin/webdesktop";
+            meta.description = "Run the webdesktop service";
+          };
+
+          checks = {
+            package = webdesktop;
+
+            vet = buildGoModule {
+              pname = "webdesktop-vet";
+              inherit version;
+
+              src = pkgs.lib.cleanSource ./.;
+              vendorHash = "sha256-x6H1qbLoOzRzpsS3yPQli8I7uUzQ58omr5oXzWxfTtI=";
+              doCheck = false;
+
+              nativeBuildInputs = mediaNativeBuildInputs;
+              buildInputs = mediaBuildInputs;
+
+              buildPhase = ''
+                runHook preBuild
+                go vet ./...
+                runHook postBuild
+              '';
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out
+                touch $out/passed
+                runHook postInstall
+              '';
+            };
+
+            systemd-unit =
+              pkgs.runCommand "webdesktop-systemd-unit"
+                {
+                  nativeBuildInputs = [ pkgs.systemd ];
+                }
+                ''
+                  export HOME=$TMPDIR
+                  export XDG_RUNTIME_DIR=$TMPDIR
+                  export SYSTEMD_UNIT_PATH=${webdesktop}/lib/systemd/user:${pkgs.systemd}/example/systemd/user
+                  systemd-analyze --user verify \
+                    ${webdesktop}/lib/systemd/user/webdesktop.service
+                  mkdir -p $out
+                  touch $out/passed
+                '';
           };
 
           devShells.default = pkgs.mkShell {

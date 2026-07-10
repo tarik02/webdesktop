@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/tarik02/webdesktop/capture"
 	"github.com/tarik02/webdesktop/input"
@@ -23,6 +24,9 @@ type Service struct {
 	media  Media
 	input  *input.Controller
 	logger *zap.Logger
+	ready  chan struct{}
+
+	readyOnce sync.Once
 }
 
 // New constructs the shared desktop service.
@@ -49,7 +53,13 @@ func New(
 		media:  mediaService,
 		input:  inputController,
 		logger: logger,
+		ready:  make(chan struct{}),
 	}, nil
+}
+
+// Ready closes after portal authorization and shared session setup succeed.
+func (s *Service) Ready() <-chan struct{} {
+	return s.ready
 }
 
 // Run authorizes one portal session and keeps it alive for media and input.
@@ -86,6 +96,9 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 		}, sender); err != nil {
 			return fmt.Errorf("attach EIS sender: %w", err)
 		}
+		s.readyOnce.Do(func() {
+			close(s.ready)
+		})
 
 		mediaCtx, cancelMedia := context.WithCancel(ctx)
 		defer cancelMedia()
@@ -117,5 +130,8 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
+	s.readyOnce.Do(func() {
+		close(s.ready)
+	})
 	return s.media.Run(ctx, session)
 }

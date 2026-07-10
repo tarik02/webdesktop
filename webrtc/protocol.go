@@ -539,6 +539,80 @@ func finite(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
+func validateAudioOffer(raw string) error {
+	description := pion.SessionDescription{
+		Type: pion.SDPTypeOffer,
+		SDP:  raw,
+	}
+	parsed, err := description.Unmarshal()
+	if err != nil {
+		return err
+	}
+
+	foundAudio := false
+	recvCapableCount := 0
+	compatible := false
+	for _, mediaDescription := range parsed.MediaDescriptions {
+		if mediaDescription.MediaName.Media != "audio" {
+			continue
+		}
+		foundAudio = true
+		if mediaDescription.MediaName.Port.Value == 0 {
+			continue
+		}
+
+		direction := ""
+		for _, attribute := range mediaDescription.Attributes {
+			switch attribute.Key {
+			case "sendrecv", "sendonly", "recvonly", "inactive":
+				direction = attribute.Key
+			}
+		}
+		if direction != "recvonly" && direction != "sendrecv" {
+			continue
+		}
+		recvCapableCount++
+
+		formats := make(map[string]struct{}, len(mediaDescription.MediaName.Formats))
+		for _, format := range mediaDescription.MediaName.Formats {
+			formats[format] = struct{}{}
+		}
+		for _, attribute := range mediaDescription.Attributes {
+			if attribute.Key != "rtpmap" {
+				continue
+			}
+			fields := strings.Fields(attribute.Value)
+			if len(fields) != 2 {
+				continue
+			}
+			if _, ok := formats[fields[0]]; !ok {
+				continue
+			}
+			codec := strings.Split(fields[1], "/")
+			if len(codec) == 3 &&
+				strings.EqualFold(codec[0], "opus") &&
+				codec[1] == "48000" &&
+				codec[2] == "2" {
+				compatible = true
+				break
+			}
+		}
+	}
+
+	switch {
+	case !foundAudio:
+		return errors.New("offer does not contain the audio media section required by enabled audio")
+	case recvCapableCount == 0:
+		return errors.New("offer does not contain an active recv-capable audio media section")
+	case recvCapableCount > 1:
+		return errors.New("offer contains multiple active recv-capable audio media sections")
+	case compatible:
+		return nil
+	default:
+		return errors.New("offer does not advertise Opus/48000/2 in an active recv-capable audio media section")
+	}
+}
+
 func validateH264Offer(raw string) error {
 	description := pion.SessionDescription{
 		Type: pion.SDPTypeOffer,

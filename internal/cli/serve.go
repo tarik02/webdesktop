@@ -57,6 +57,9 @@ func newServeCommand() *cobra.Command {
 	flags.Int("video-keyframe-interval", defaults.Video.Tuning.KeyframeInterval, "maximum frames between keyframes")
 	flags.Int("video-vp8-cpu-used", defaults.Video.Tuning.VP8CPUUsed, "VP8 speed setting from 0 to 16")
 	flags.String("video-h264-speed-preset", defaults.Video.Tuning.H264SpeedPreset, "x264 software speed preset")
+	flags.Bool("audio-enabled", defaults.Audio.Enabled, "capture desktop audio from a PulseAudio monitor")
+	flags.String("audio-device", defaults.Audio.Device, "PulseAudio monitor source")
+	flags.Int("audio-bitrate-kbps", defaults.Audio.BitrateKbps, "Opus audio bitrate in Kbit/s")
 	flags.Bool("input-enabled", defaults.Input.Enabled, "request remote pointer and keyboard input")
 	flags.Bool("input-pointer", defaults.Input.Pointer, "enable remote pointer input")
 	flags.Bool("input-keyboard", defaults.Input.Keyboard, "enable remote keyboard input")
@@ -96,6 +99,9 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("video.tuning.keyframe_interval", defaults.Video.Tuning.KeyframeInterval)
 	v.SetDefault("video.tuning.vp8_cpu_used", defaults.Video.Tuning.VP8CPUUsed)
 	v.SetDefault("video.tuning.h264_speed_preset", defaults.Video.Tuning.H264SpeedPreset)
+	v.SetDefault("audio.enabled", defaults.Audio.Enabled)
+	v.SetDefault("audio.device", defaults.Audio.Device)
+	v.SetDefault("audio.bitrate_kbps", defaults.Audio.BitrateKbps)
 	v.SetDefault("input.enabled", defaults.Input.Enabled)
 	v.SetDefault("input.pointer", defaults.Input.Pointer)
 	v.SetDefault("input.keyboard", defaults.Input.Keyboard)
@@ -125,6 +131,9 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video.tuning.keyframe_interval",
 		"video.tuning.vp8_cpu_used",
 		"video.tuning.h264_speed_preset",
+		"audio.enabled",
+		"audio.device",
+		"audio.bitrate_kbps",
 		"input.enabled",
 		"input.pointer",
 		"input.keyboard",
@@ -159,6 +168,9 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video-keyframe-interval": "video.tuning.keyframe_interval",
 		"video-vp8-cpu-used":      "video.tuning.vp8_cpu_used",
 		"video-h264-speed-preset": "video.tuning.h264_speed_preset",
+		"audio-enabled":           "audio.enabled",
+		"audio-device":            "audio.device",
+		"audio-bitrate-kbps":      "audio.bitrate_kbps",
 		"input-enabled":           "input.enabled",
 		"input-pointer":           "input.pointer",
 		"input-keyboard":          "input.keyboard",

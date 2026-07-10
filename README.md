@@ -5,11 +5,13 @@ uses xdg-desktop-portal ScreenCast for monitor capture, owns the portal
 PipeWire remote for the lifetime of one shared GStreamer pipeline, and encodes
 video in software as VP8 or H.264. Remote pointer and keyboard events use the
 xdg-desktop-portal RemoteDesktop interface, `ConnectToEIS`, and the system
-libei library.
+libei library. Optional desktop audio uses `pulsesrc` through PipeWire's
+PulseAudio-compatible server and software Opus encoding.
 
 The service includes WebSocket signaling and a versioned data-channel protocol
-for video quality and exclusive input control. It has no frontend, audio,
-remote unlock, built-in authentication, TLS termination, or systemd unit.
+for video quality and exclusive input control. It has no frontend, remote
+unlock, built-in authentication, or TLS termination. Audio is disabled by
+default.
 
 ## Commands
 
@@ -47,6 +49,12 @@ unlock. Input works only while the authorized Plasma session is active and
 unlocked. If the user denies or cancels the portal dialog, the service exits
 and closes signaling and all peers.
 
+Desktop audio is gated by the same authorization. The Pulse monitor is not
+opened until the portal Start flow succeeds and optional EIS setup completes.
+While consent is pending, health and signaling remain available but the audio
+track is silent. Denial or portal setup failure prevents audio capture from
+starting.
+
 ## WebRTC behavior
 
 The configured video codec is the only codec registered with Pion. VP8 frames
@@ -63,21 +71,46 @@ The GStreamer caps force constrained-baseline Level 4.0. x264 writes
 constrained-baseline Level 4.0 bitstreams; the extra `42e0` constraint flag is
 the canonical form used by libwebrtc SDP and lets Pion match browser offers.
 
-All peers share one encoded GStreamer stream. Each peer has its own RTP
-packetizer, bounded eight-sample queue, and writer. A slow TURN/TCP or TURN/TLS
-peer can drop only its own queued samples. It cannot block capture, another
-peer, or service shutdown. Connecting a viewer does not create another
-GStreamer pipeline. Each WebSocket owns one peer connection, and the default
-maximum is two peers.
+All peers share one encoded video stream and, when enabled, one encoded audio
+stream. Each peer has separate bounded video and audio queues, RTP packetizers,
+and writers. A slow TURN/TCP or TURN/TLS peer can drop only its own queued
+samples. It cannot block capture, another peer, the other media track, or
+service shutdown. Connecting a viewer does not create another GStreamer
+pipeline. Each WebSocket owns one peer connection, and the default maximum is
+two peers.
 
 Per-peer RTP timing follows encoded sample PTS gaps, so queue drops preserve
 elapsed media time. A PTS regression or a jump over 10 seconds is treated as a
 pipeline discontinuity and advances by the encoded sample duration instead.
+This handling is independent for video and audio.
 
-The service reads RTCP from every video sender. PLI, FIR, and a newly connected
-peer request a keyframe from the active GStreamer encoder. The encoder receives
-an upstream force-key-unit event with headers requested, which works for both
-VP8 and H.264.
+The service reads RTCP from every video and audio sender. PLI, FIR, and a newly
+connected peer request a keyframe from the active GStreamer video encoder. The
+encoder receives an upstream force-key-unit event with headers requested,
+which works for both VP8 and H.264. Pion's default sender-report interceptor
+maps each track's RTP clock to NTP time. The tracks use the same WebRTC media
+stream ID. This gives browsers the standard A/V clock correlation, but capture
+latency between the independent pipelines is not calibrated for perfect lip
+sync.
+
+## Optional desktop audio
+
+Audio requires PipeWire with the `pipewire-pulse` compatibility daemon and the
+GStreamer `pulsesrc` and `opusenc` elements. The default device is
+`@DEFAULT_MONITOR@`, the PulseAudio protocol name for the monitor of the
+current default sink. A configured explicit source must end in `.monitor`.
+`webdesktop` rejects other device names instead of falling back to a
+microphone. Use `pactl list short sources` in the graphical user session to
+find an explicit monitor source.
+
+The pipeline converts and resamples to stereo S16LE at 48 kHz, then encodes
+20 ms Opus frames at the configured bitrate. Capture callbacks only enqueue
+into a bounded channel. The service watches the resolved Pulse source for the
+full pipeline lifetime. Moving an explicit monitor stream elsewhere, resolving
+`@DEFAULT_MONITOR@` to a non-monitor source, source disappearance, PulseAudio
+failure, plugin failure, or encoder failure terminates the application and
+tears down the portal session and peers. With `audio.enabled: false`, no audio
+device is opened and the video/input behavior is unchanged.
 
 ## Signaling protocol
 
@@ -93,12 +126,18 @@ The server sends a ping every 5 seconds after upgrade and requires pongs within
 Timeouts release the peer slot. Shutdown sends a bounded WebSocket close frame
 before closing the socket.
 
-The client must create a recv-only video transceiver and a reliable ordered data
-channel named `control` before creating its offer. A client that wants input
-must also create one reliable ordered data channel named `input`. Creating a
-data channel ensures that the offer contains the SCTP media section. The server
-rejects other labels, duplicate channels, and either channel when configured
-for unordered or partial-reliable delivery.
+The client must create a recv-only video transceiver and a reliable ordered
+data channel named `control` before creating its offer. When audio is enabled,
+the offer must contain an active `recvonly` or `sendrecv` audio media section
+with Opus at 48 kHz and two channels. Missing, rejected, inactive, send-only,
+or incompatible audio sections fail as `invalid_offer` before Pion installs
+the remote description. The registered Opus payload type is 111. When audio is
+disabled, no audio codec or track is registered and existing video-only
+clients keep working. A client that wants input must also create one reliable
+ordered data channel named `input`. Creating a data channel ensures that the
+offer contains the SCTP media section. The server rejects other labels,
+duplicate channels, and either channel when configured for unordered or
+partial-reliable delivery.
 
 Client offer:
 
@@ -423,6 +462,15 @@ Input settings include only implemented behavior:
 - `input.keyboard`
 - `input.queue_size`
 
+Audio settings are static:
+
+- `audio.enabled`
+- `audio.device`
+- `audio.bitrate_kbps`
+
+Audio has no runtime quality command. The codec, 48 kHz sample rate, stereo
+channel count, and 20 ms frame duration are fixed.
+
 The remote-desktop binary defaults to pointer and keyboard control. Embedding
 deployments can set `input.enabled: false` to keep view-only ScreenCast
 behavior.
@@ -448,8 +496,8 @@ and protect signaling and both data channels before exposing them beyond the
 local machine. A peer that acquires input can control the active unlocked
 desktop with the portal-authorized pointer and keyboard classes.
 
-There is no clipboard, file transfer, gamepad, touch, audio, or remote unlock.
-The portal and Plasma lock screen remain the authority. Input cannot unlock a
+There is no clipboard, file transfer, gamepad, touch, or remote unlock. The
+portal and Plasma lock screen remain the authority. Input cannot unlock a
 locked session.
 
 If the UDP port minimum and maximum are both zero, Pion uses the system
@@ -478,7 +526,59 @@ handler on its own router after its authentication and authorization
 middleware. The standalone binary mounts it at the configured signaling path
 and keeps `GET /healthz`.
 
-## Development and build
+## Build and run
+
+Build the package:
+
+```bash
+nix build path:.#
+```
+
+Run the binary without installing it:
+
+```bash
+nix run path:.# -- version
+nix run path:.# -- serve --config ./webdesktop.example.yaml
+```
+
+The second command opens the normal Plasma portal consent dialog.
+
+## systemd user service
+
+Install the package into the user profile, copy the packaged example, and
+enable the packaged unit:
+
+```bash
+nix profile install path:.#
+package=$(nix path-info path:.#)
+install -Dm600 "$package/share/webdesktop/config.example.yaml" \
+  "$HOME/.config/webdesktop/config.yaml"
+systemctl --user enable --now \
+  "$package/lib/systemd/user/webdesktop.service"
+```
+
+Edit `~/.config/webdesktop/config.yaml` before starting the service if the
+defaults are not suitable. The unit passes that exact path to the binary.
+
+The unit uses `WantedBy=`, `After=`, `Requisite=`, and `PartOf=` for
+`graphical-session.target`. It stops with the graphical session and cannot
+start successfully when that target is inactive. D-Bus, the portal, PipeWire,
+and pipewire-pulse are reached through the active user session and their normal
+socket or D-Bus activation. The unit does not hard-code distribution-specific
+service names.
+
+The unit has no restart policy. A denied portal request or invalid
+configuration stays failed instead of repeatedly reopening the consent dialog.
+`TimeoutStopSec=15s` leaves time for peer, HTTP, GStreamer, libei, and portal
+cleanup after SIGTERM.
+
+Disable it with:
+
+```bash
+systemctl --user disable --now webdesktop.service
+```
+
+## Development
 
 Enter the development environment:
 
@@ -486,9 +586,12 @@ Enter the development environment:
 nix develop
 ```
 
-Build the Go packages or the Nix package:
+Build and vet the Go packages:
 
 ```bash
 go build ./...
-nix build .#
+go vet ./...
 ```
+
+`nix flake check path:.` builds the package, runs `go vet ./...`, and verifies
+the packaged systemd user unit. It does not run a test suite.

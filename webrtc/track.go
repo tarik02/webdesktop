@@ -20,6 +20,7 @@ type trackBinding struct {
 
 type sampleTrack struct {
 	capability pion.RTPCodecCapability
+	kind       pion.RTPCodecType
 	id         string
 	streamID   string
 
@@ -29,9 +30,15 @@ type sampleTrack struct {
 	remainder  float64
 }
 
-func newSampleTrack(capability pion.RTPCodecCapability, id, streamID string) *sampleTrack {
+func newSampleTrack(
+	capability pion.RTPCodecCapability,
+	kind pion.RTPCodecType,
+	id string,
+	streamID string,
+) *sampleTrack {
 	return &sampleTrack{
 		capability: capability,
+		kind:       kind,
 		id:         id,
 		streamID:   streamID,
 	}
@@ -42,7 +49,8 @@ func (t *sampleTrack) Bind(context pion.TrackLocalContext) (pion.RTPCodecParamet
 	found := false
 	for _, codec := range context.CodecParameters() {
 		if strings.EqualFold(codec.MimeType, t.capability.MimeType) &&
-			codec.ClockRate == t.capability.ClockRate {
+			codec.ClockRate == t.capability.ClockRate &&
+			codec.Channels == t.capability.Channels {
 			negotiated = codec
 			found = true
 			break
@@ -55,6 +63,8 @@ func (t *sampleTrack) Bind(context pion.TrackLocalContext) (pion.RTPCodecParamet
 	var payloader rtp.Payloader = &codecs.VP8Payloader{}
 	if strings.EqualFold(t.capability.MimeType, pion.MimeTypeH264) {
 		payloader = &codecs.H264Payloader{}
+	} else if strings.EqualFold(t.capability.MimeType, pion.MimeTypeOpus) {
+		payloader = &codecs.OpusPayloader{}
 	}
 
 	t.mu.Lock()
@@ -98,7 +108,7 @@ func (t *sampleTrack) StreamID() string {
 }
 
 func (t *sampleTrack) Kind() pion.RTPCodecType {
-	return pion.RTPCodecTypeVideo
+	return t.kind
 }
 
 func (t *sampleTrack) WriteSample(data []byte, duration time.Duration) error {

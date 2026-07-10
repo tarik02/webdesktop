@@ -20,6 +20,11 @@ video:
     vp8_cpu_used: 8
     h264_speed_preset: veryfast
 
+audio:
+  enabled: false
+  device: "@DEFAULT_MONITOR@"
+  bitrate_kbps: 128
+
 input:
   enabled: true
   pointer: true

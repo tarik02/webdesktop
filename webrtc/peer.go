@@ -41,9 +41,13 @@ type peer struct {
 	logger  *zap.Logger
 	conn    *websocket.Conn
 	pc      *pion.PeerConnection
-	sender  *pion.RTPSender
-	track   *sampleTrack
-	samples chan media.Sample
+
+	videoSender  *pion.RTPSender
+	videoTrack   *sampleTrack
+	videoSamples chan media.Sample
+	audioSender  *pion.RTPSender
+	audioTrack   *sampleTrack
+	audioSamples chan media.AudioSample
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -82,17 +86,22 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 	}
 
 	ctx, cancel := context.WithCancel(s.ctx)
-	track := newSampleTrack(s.capability, fmt.Sprintf("video-%d", id), "desktop")
+	videoTrack := newSampleTrack(
+		s.videoCodec,
+		pion.RTPCodecTypeVideo,
+		fmt.Sprintf("video-%d", id),
+		"desktop",
+	)
 	peer := &peer{
-		id:      id,
-		service: s,
-		logger:  s.logger.With(zap.Uint64("peer_id", id)),
-		conn:    connection,
-		pc:      peerConnection,
-		track:   track,
-		samples: make(chan media.Sample, peerSampleQueueSize),
-		ctx:     ctx,
-		cancel:  cancel,
+		id:           id,
+		service:      s,
+		logger:       s.logger.With(zap.Uint64("peer_id", id)),
+		conn:         connection,
+		pc:           peerConnection,
+		videoTrack:   videoTrack,
+		videoSamples: make(chan media.Sample, peerSampleQueueSize),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 	if err := s.registerPeer(peer); err != nil {
 		cancel()
@@ -100,12 +109,27 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		return nil, err
 	}
 
-	sender, err := peerConnection.AddTrack(track)
+	videoSender, err := peerConnection.AddTrack(videoTrack)
 	if err != nil {
 		peer.Close()
 		return nil, fmt.Errorf("add video track: %w", err)
 	}
-	peer.sender = sender
+	peer.videoSender = videoSender
+	if s.cfg.AudioEnabled {
+		peer.audioTrack = newSampleTrack(
+			s.audioCodec,
+			pion.RTPCodecTypeAudio,
+			fmt.Sprintf("audio-%d", id),
+			"desktop",
+		)
+		peer.audioSamples = make(chan media.AudioSample, 16)
+		audioSender, err := peerConnection.AddTrack(peer.audioTrack)
+		if err != nil {
+			peer.Close()
+			return nil, fmt.Errorf("add audio track: %w", err)
+		}
+		peer.audioSender = audioSender
+	}
 
 	peerConnection.OnICECandidate(peer.onLocalICECandidate)
 	peerConnection.OnConnectionStateChange(func(state pion.PeerConnectionState) {
@@ -127,8 +151,12 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 	})
 	peerConnection.OnDataChannel(peer.onDataChannel)
 
-	go peer.readRTCP()
-	go peer.writeSamples()
+	go peer.readRTCP(peer.videoSender, true)
+	go peer.writeVideoSamples()
+	if peer.audioSender != nil {
+		go peer.readRTCP(peer.audioSender, false)
+		go peer.writeAudioSamples()
+	}
 	peer.logger.Info("WebRTC peer created", zap.Int("active_peers", s.PeerCount()))
 	return peer, nil
 }
@@ -263,6 +291,11 @@ func (p *peer) run(requestContext context.Context) {
 func (p *peer) handleOffer(sdp string) error {
 	if p.offerHandled {
 		return errors.New("only one offer is allowed per WebSocket connection")
+	}
+	if p.service.cfg.AudioEnabled {
+		if err := validateAudioOffer(sdp); err != nil {
+			return err
+		}
 	}
 	if p.service.cfg.Codec == media.CodecH264 {
 		if err := validateH264Offer(sdp); err != nil {
@@ -427,16 +460,22 @@ func (p *peer) pingLoop() {
 	}
 }
 
-func (p *peer) readRTCP() {
+func (p *peer) readRTCP(sender *pion.RTPSender, video bool) {
 	for {
-		packets, _, err := p.sender.ReadRTCP()
+		packets, _, err := sender.ReadRTCP()
 		if err != nil {
 			if !errors.Is(err, io.EOF) &&
 				!errors.Is(err, io.ErrClosedPipe) &&
 				p.ctx.Err() == nil {
-				p.logger.Debug("RTCP reader stopped", zap.Error(err))
+				p.logger.Debug("RTCP reader stopped",
+					zap.Bool("video", video),
+					zap.Error(err),
+				)
 			}
 			return
+		}
+		if !video {
+			continue
 		}
 		for _, packet := range packets {
 			switch packet.(type) {
@@ -698,33 +737,52 @@ func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataCh
 	}
 }
 
-func (p *peer) enqueueSample(sample media.Sample) {
+func (p *peer) enqueueVideo(sample media.Sample) {
 	if !p.connected.Load() || p.ctx.Err() != nil {
 		return
 	}
 	select {
-	case p.samples <- sample:
+	case p.videoSamples <- sample:
 		return
 	default:
 	}
 	select {
-	case <-p.samples:
+	case <-p.videoSamples:
 	default:
 	}
 	select {
-	case p.samples <- sample:
+	case p.videoSamples <- sample:
 	default:
 	}
 }
 
-func (p *peer) writeSamples() {
+func (p *peer) enqueueAudio(sample media.AudioSample) {
+	if !p.connected.Load() || p.ctx.Err() != nil {
+		return
+	}
+	select {
+	case p.audioSamples <- sample:
+		return
+	default:
+	}
+	select {
+	case <-p.audioSamples:
+	default:
+	}
+	select {
+	case p.audioSamples <- sample:
+	default:
+	}
+}
+
+func (p *peer) writeVideoSamples() {
 	var pending media.Sample
 	havePending := false
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
-		case sample := <-p.samples:
+		case sample := <-p.videoSamples:
 			if !havePending {
 				pending = sample
 				havePending = true
@@ -741,10 +799,46 @@ func (p *peer) writeSamples() {
 					zap.Duration("sample_duration", pending.Duration),
 				)
 			}
-			if err := p.track.WriteSample(pending.Data, duration); err != nil {
+			if err := p.videoTrack.WriteSample(pending.Data, duration); err != nil {
 				if p.ctx.Err() == nil {
 					p.logger.Debug("peer video writer stopped", zap.Error(err))
 					go p.closeWith(websocket.CloseGoingAway, "video transport stopped")
+				}
+				return
+			}
+			pending = sample
+		}
+	}
+}
+
+func (p *peer) writeAudioSamples() {
+	var pending media.AudioSample
+	havePending := false
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case sample := <-p.audioSamples:
+			if !havePending {
+				pending = sample
+				havePending = true
+				continue
+			}
+
+			duration := pending.Duration
+			if delta := sample.PTS - pending.PTS; delta > 0 && delta <= maxRTPPTSJump {
+				duration = delta
+			} else if delta <= 0 || delta > maxRTPPTSJump {
+				p.logger.Debug("audio RTP PTS discontinuity",
+					zap.Duration("previous_pts", pending.PTS),
+					zap.Duration("current_pts", sample.PTS),
+					zap.Duration("sample_duration", pending.Duration),
+				)
+			}
+			if err := p.audioTrack.WriteSample(pending.Data, duration); err != nil {
+				if p.ctx.Err() == nil {
+					p.logger.Debug("peer audio writer stopped", zap.Error(err))
+					go p.closeWith(websocket.CloseGoingAway, "audio transport stopped")
 				}
 				return
 			}

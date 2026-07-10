@@ -25,6 +25,7 @@ const (
 	servicePeerCloseTimeout      = 4 * time.Second
 	vp8PayloadType               = 96
 	h264PayloadType              = 102
+	opusPayloadType              = 111
 )
 
 var (
@@ -40,9 +41,16 @@ type Media interface {
 	RequestKeyframe() error
 }
 
+// AudioMedia is the optional encoded audio API required by the WebRTC transport.
+type AudioMedia interface {
+	Enabled() bool
+	Samples() <-chan media.AudioSample
+}
+
 // Config contains static WebRTC and signaling settings.
 type Config struct {
 	Codec          string
+	AudioEnabled   bool
 	ICEServers     []string
 	ICEUsername    string
 	ICECredential  string
@@ -109,9 +117,11 @@ func (cfg Config) Validate() error {
 type Service struct {
 	cfg        Config
 	source     Media
+	audio      AudioMedia
 	input      *remoteinput.Controller
 	logger     *zap.Logger
-	capability pion.RTPCodecCapability
+	videoCodec pion.RTPCodecCapability
+	audioCodec pion.RTPCodecCapability
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -130,12 +140,24 @@ type Service struct {
 }
 
 // New constructs a reusable WebRTC service without opening listeners.
-func New(cfg Config, source Media, inputController *remoteinput.Controller, logger *zap.Logger) (*Service, error) {
+func New(
+	cfg Config,
+	source Media,
+	audio AudioMedia,
+	inputController *remoteinput.Controller,
+	logger *zap.Logger,
+) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	if source == nil {
 		return nil, errors.New("WebRTC media source is required")
+	}
+	if audio == nil {
+		return nil, errors.New("WebRTC audio source is required")
+	}
+	if audio.Enabled() != cfg.AudioEnabled {
+		return nil, errors.New("WebRTC audio configuration does not match the audio source")
 	}
 	if inputController == nil {
 		return nil, errors.New("WebRTC input controller is required")
@@ -153,7 +175,7 @@ func New(cfg Config, source Media, inputController *remoteinput.Controller, logg
 		}
 	}
 
-	capability := pion.RTPCodecCapability{
+	videoCodec := pion.RTPCodecCapability{
 		MimeType:  pion.MimeTypeVP8,
 		ClockRate: 90000,
 		RTCPFeedback: []pion.RTCPFeedback{
@@ -163,17 +185,25 @@ func New(cfg Config, source Media, inputController *remoteinput.Controller, logg
 		},
 	}
 	if cfg.Codec == media.CodecH264 {
-		capability.MimeType = pion.MimeTypeH264
-		capability.SDPFmtpLine = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=" + media.H264SDPProfileLevelID
+		videoCodec.MimeType = pion.MimeTypeH264
+		videoCodec.SDPFmtpLine = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=" + media.H264SDPProfileLevelID
+	}
+	audioCodec := pion.RTPCodecCapability{
+		MimeType:    pion.MimeTypeOpus,
+		ClockRate:   48000,
+		Channels:    2,
+		SDPFmtpLine: "minptime=10;useinbandfec=1",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
 		cfg:              cfg,
 		source:           source,
+		audio:            audio,
 		input:            inputController,
 		logger:           logger,
-		capability:       capability,
+		videoCodec:       videoCodec,
+		audioCodec:       audioCodec,
 		ctx:              ctx,
 		cancel:           cancel,
 		peers:            make(map[*peer]struct{}),
@@ -240,6 +270,11 @@ func (s *Service) Run(ctx context.Context) error {
 
 	defer s.Close()
 
+	var audioSamples <-chan media.AudioSample
+	if s.cfg.AudioEnabled {
+		audioSamples = s.audio.Samples()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -268,7 +303,21 @@ func (s *Service) Run(ctx context.Context) error {
 				continue
 			}
 			for _, peer := range s.peerSnapshot() {
-				peer.enqueueSample(sample)
+				peer.enqueueVideo(sample)
+			}
+		case sample, ok := <-audioSamples:
+			if !ok {
+				if ctx.Err() != nil || s.ctx.Err() != nil {
+					return nil
+				}
+				return errors.New("audio sample stream stopped")
+			}
+			if sample.Duration <= 0 {
+				s.logger.Warn("dropping audio sample without a positive duration")
+				continue
+			}
+			for _, peer := range s.peerSnapshot() {
+				peer.enqueueAudio(sample)
 			}
 		}
 	}
@@ -323,10 +372,18 @@ func (s *Service) newPeerConnection() (*pion.PeerConnection, error) {
 		payloadType = h264PayloadType
 	}
 	if err := mediaEngine.RegisterCodec(pion.RTPCodecParameters{
-		RTPCodecCapability: s.capability,
+		RTPCodecCapability: s.videoCodec,
 		PayloadType:        payloadType,
 	}, pion.RTPCodecTypeVideo); err != nil {
 		return nil, fmt.Errorf("register video codec: %w", err)
+	}
+	if s.cfg.AudioEnabled {
+		if err := mediaEngine.RegisterCodec(pion.RTPCodecParameters{
+			RTPCodecCapability: s.audioCodec,
+			PayloadType:        opusPayloadType,
+		}, pion.RTPCodecTypeAudio); err != nil {
+			return nil, fmt.Errorf("register audio codec: %w", err)
+		}
 	}
 
 	registry := &interceptor.Registry{}

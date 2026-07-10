@@ -22,6 +22,7 @@ type App struct {
 	logger  *zap.Logger
 	server  *httpserver.Server
 	desktop *desktop.Service
+	audio   *media.AudioService
 	input   *remoteinput.Controller
 	webrtc  *rtc.Service
 }
@@ -76,6 +77,16 @@ func New(cfg config.Config) (*App, error) {
 		_ = logger.Sync()
 		return nil, err
 	}
+	audioService, err := media.NewAudio(media.AudioConfig{
+		Enabled:     cfg.Audio.Enabled,
+		Device:      cfg.Audio.Device,
+		BitrateKbps: cfg.Audio.BitrateKbps,
+	}, logger.Named("audio"))
+	if err != nil {
+		_ = inputController.Close()
+		_ = logger.Sync()
+		return nil, err
+	}
 
 	desktopService, err := desktop.New(
 		portalConfig,
@@ -91,6 +102,7 @@ func New(cfg config.Config) (*App, error) {
 
 	webrtcService, err := rtc.New(rtc.Config{
 		Codec:          cfg.Video.Codec,
+		AudioEnabled:   cfg.Audio.Enabled,
 		ICEServers:     cfg.WebRTC.ICEServers,
 		ICEUsername:    cfg.WebRTC.ICEUsername,
 		ICECredential:  cfg.WebRTC.ICECredential,
@@ -98,7 +110,7 @@ func New(cfg config.Config) (*App, error) {
 		UDPPortMax:     uint16(cfg.WebRTC.UDPPortMax),
 		MaxPeers:       cfg.WebRTC.MaxPeers,
 		AllowedOrigins: cfg.WebRTC.AllowedOrigins,
-	}, mediaService, inputController, logger.Named("webrtc"))
+	}, mediaService, audioService, inputController, logger.Named("webrtc"))
 	if err != nil {
 		_ = inputController.Close()
 		_ = logger.Sync()
@@ -119,6 +131,7 @@ func New(cfg config.Config) (*App, error) {
 		logger:  logger,
 		server:  server,
 		desktop: desktopService,
+		audio:   audioService,
 		input:   inputController,
 		webrtc:  webrtcService,
 	}, nil
@@ -135,7 +148,11 @@ func (a *App) Serve(ctx context.Context) error {
 		component string
 		err       error
 	}
-	results := make(chan result, 3)
+	componentCount := 3
+	if a.audio.Enabled() {
+		componentCount++
+	}
+	results := make(chan result, componentCount)
 	go func() {
 		results <- result{component: "http server", err: a.server.Serve(runCtx)}
 	}()
@@ -145,9 +162,14 @@ func (a *App) Serve(ctx context.Context) error {
 	go func() {
 		results <- result{component: "WebRTC", err: a.webrtc.Run(runCtx)}
 	}()
+	if a.audio.Enabled() {
+		go func() {
+			results <- result{component: "audio", err: a.audio.Run(runCtx, a.desktop.Ready())}
+		}()
+	}
 
 	var runErr error
-	for range 3 {
+	for range componentCount {
 		result := <-results
 		if result.err != nil && runCtx.Err() != nil && errors.Is(result.err, context.Canceled) {
 			continue
