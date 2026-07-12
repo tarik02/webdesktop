@@ -111,9 +111,9 @@ func (t *sampleTrack) Kind() pion.RTPCodecType {
 	return t.kind
 }
 
-func (t *sampleTrack) WriteSample(data []byte, duration time.Duration) error {
+func (t *sampleTrack) WriteSample(data []byte, duration time.Duration) (uint32, error) {
 	if duration <= 0 {
-		return errors.New("RTP sample duration must be positive")
+		return 0, errors.New("RTP sample duration must be positive")
 	}
 
 	t.mu.Lock()
@@ -121,9 +121,8 @@ func (t *sampleTrack) WriteSample(data []byte, duration time.Duration) error {
 	packetizer := t.packetizer
 	if binding == nil || packetizer == nil {
 		t.mu.Unlock()
-		return nil
+		return 0, nil
 	}
-
 	total := duration.Seconds()*float64(t.capability.ClockRate) + t.remainder
 	ticks := uint32(total)
 	t.remainder = total - float64(ticks)
@@ -131,8 +130,40 @@ func (t *sampleTrack) WriteSample(data []byte, duration time.Duration) error {
 	t.mu.Unlock()
 	for _, packet := range packets {
 		if _, err := binding.writer.WriteRTP(&packet.Header, packet.Payload); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return ticks, nil
+}
+
+func (t *sampleTrack) WriteSampleAt(data []byte, timestampAdvance time.Duration) (uint64, error) {
+	if timestampAdvance < 0 {
+		return 0, errors.New("RTP timestamp advance must not be negative")
+	}
+
+	t.mu.Lock()
+	binding := t.binding
+	packetizer := t.packetizer
+	if binding == nil || packetizer == nil {
+		t.mu.Unlock()
+		return 0, nil
+	}
+
+	clockRate := uint64(t.capability.ClockRate)
+	wholeTicks := uint64(timestampAdvance/time.Second) * clockRate
+	fraction := float64(timestampAdvance%time.Second)*float64(clockRate)/float64(time.Second) + t.remainder
+	fractionTicks := uint64(fraction)
+	ticks := wholeTicks + fractionTicks
+	t.remainder = fraction - float64(fractionTicks)
+	if advance := uint32(ticks); advance > 0 {
+		packetizer.SkipSamples(advance)
+	}
+	packets := packetizer.Packetize(data, 0)
+	t.mu.Unlock()
+	for _, packet := range packets {
+		if _, err := binding.writer.WriteRTP(&packet.Header, packet.Payload); err != nil {
+			return 0, err
+		}
+	}
+	return ticks, nil
 }

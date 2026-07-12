@@ -68,6 +68,13 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("open desktop portal session: %w", err)
 	}
+	restore := session.RestoreStatus()
+	s.logger.Info("desktop portal session authorized",
+		zap.String("application_id", restore.ApplicationID),
+		zap.String("restore_token_path", restore.StatePath),
+		zap.Bool("restore_token_attempted", restore.TokenAttempted),
+		zap.Bool("restore_token_rotated", restore.TokenRotated),
+	)
 	defer func() {
 		runErr = errors.Join(runErr, session.Close())
 	}()

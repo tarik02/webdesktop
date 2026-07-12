@@ -13,6 +13,7 @@ import (
 	remoteinput "github.com/tarik02/webdesktop/input"
 	"github.com/tarik02/webdesktop/logging"
 	"github.com/tarik02/webdesktop/media"
+	webui "github.com/tarik02/webdesktop/web"
 	rtc "github.com/tarik02/webdesktop/webrtc"
 	"go.uber.org/zap"
 )
@@ -69,7 +70,6 @@ func New(cfg config.Config) (*App, error) {
 			Threads:          cfg.Video.Tuning.Threads,
 			KeyframeInterval: cfg.Video.Tuning.KeyframeInterval,
 			VP8CPUUsed:       cfg.Video.Tuning.VP8CPUUsed,
-			H264SpeedPreset:  cfg.Video.Tuning.H264SpeedPreset,
 		},
 	}, logger.Named("media"))
 	if err != nil {
@@ -110,6 +110,7 @@ func New(cfg config.Config) (*App, error) {
 		UDPPortMax:     uint16(cfg.WebRTC.UDPPortMax),
 		MaxPeers:       cfg.WebRTC.MaxPeers,
 		AllowedOrigins: cfg.WebRTC.AllowedOrigins,
+		TracingEnabled: cfg.Tracing.Enabled,
 	}, mediaService, audioService, inputController, logger.Named("webrtc"))
 	if err != nil {
 		_ = inputController.Close()
@@ -118,7 +119,64 @@ func New(cfg config.Config) (*App, error) {
 	}
 
 	server, err := httpserver.New(cfg.Server, logger, func(router *gin.Engine) {
+		router.GET("/api/config", func(c *gin.Context) {
+			c.JSON(200, struct {
+				Version       int           `json:"version"`
+				SignalingPath string        `json:"signaling_path"`
+				Video         media.Quality `json:"video"`
+				Audio         struct {
+					Enabled bool `json:"enabled"`
+				} `json:"audio"`
+				Tracing struct {
+					Enabled bool `json:"enabled"`
+				} `json:"tracing"`
+				Input struct {
+					Enabled  bool `json:"enabled"`
+					Pointer  bool `json:"pointer"`
+					Keyboard bool `json:"keyboard"`
+				} `json:"input"`
+			}{
+				Version:       1,
+				SignalingPath: cfg.WebRTC.SignalingPath,
+				Video:         mediaService.Quality(),
+				Audio: struct {
+					Enabled bool `json:"enabled"`
+				}{Enabled: cfg.Audio.Enabled},
+				Tracing: struct {
+					Enabled bool `json:"enabled"`
+				}{Enabled: cfg.Tracing.Enabled},
+				Input: struct {
+					Enabled  bool `json:"enabled"`
+					Pointer  bool `json:"pointer"`
+					Keyboard bool `json:"keyboard"`
+				}{
+					Enabled:  cfg.Input.Enabled,
+					Pointer:  cfg.Input.Pointer,
+					Keyboard: cfg.Input.Keyboard,
+				},
+			})
+		})
+		router.GET("/api/status", func(c *gin.Context) {
+			ready := false
+			select {
+			case <-desktopService.Ready():
+				ready = true
+			default:
+			}
+			c.JSON(200, struct {
+				Status      string        `json:"status"`
+				Ready       bool          `json:"ready"`
+				ActivePeers int           `json:"active_peers"`
+				Video       media.Quality `json:"video"`
+			}{
+				Status:      "ok",
+				Ready:       ready,
+				ActivePeers: webrtcService.PeerCount(),
+				Video:       mediaService.Quality(),
+			})
+		})
 		router.GET(cfg.WebRTC.SignalingPath, webrtcService.Handler())
+		webui.Mount(router)
 	})
 	if err != nil {
 		webrtcService.Close()

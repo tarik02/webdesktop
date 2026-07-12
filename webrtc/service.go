@@ -58,6 +58,7 @@ type Config struct {
 	UDPPortMax     uint16
 	MaxPeers       int
 	AllowedOrigins []string
+	TracingEnabled bool
 }
 
 // Validate checks the implemented transport settings.
@@ -120,7 +121,6 @@ type Service struct {
 	audio      AudioMedia
 	input      *remoteinput.Controller
 	logger     *zap.Logger
-	videoCodec pion.RTPCodecCapability
 	audioCodec pion.RTPCodecCapability
 
 	ctx    context.Context
@@ -135,8 +135,9 @@ type Service struct {
 	count   int
 	peers   map[*peer]struct{}
 
-	qualityMu        sync.Mutex
-	keyframeRequests chan string
+	qualityMu         sync.Mutex
+	qualityGeneration uint64
+	keyframeRequests  chan string
 }
 
 // New constructs a reusable WebRTC service without opening listeners.
@@ -170,24 +171,11 @@ func New(
 		return nil, fmt.Errorf("media quality codec %q does not match WebRTC codec %q", quality.Codec, cfg.Codec)
 	}
 	if cfg.Codec == media.CodecH264 {
-		if err := media.ValidateH264Level4(quality); err != nil {
+		if err := media.ValidateH264Level42(quality); err != nil {
 			return nil, fmt.Errorf("validate H.264 WebRTC quality: %w", err)
 		}
 	}
 
-	videoCodec := pion.RTPCodecCapability{
-		MimeType:  pion.MimeTypeVP8,
-		ClockRate: 90000,
-		RTCPFeedback: []pion.RTCPFeedback{
-			{Type: pion.TypeRTCPFBNACK},
-			{Type: pion.TypeRTCPFBNACK, Parameter: "pli"},
-			{Type: pion.TypeRTCPFBCCM, Parameter: "fir"},
-		},
-	}
-	if cfg.Codec == media.CodecH264 {
-		videoCodec.MimeType = pion.MimeTypeH264
-		videoCodec.SDPFmtpLine = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=" + media.H264SDPProfileLevelID
-	}
 	audioCodec := pion.RTPCodecCapability{
 		MimeType:    pion.MimeTypeOpus,
 		ClockRate:   48000,
@@ -202,7 +190,6 @@ func New(
 		audio:            audio,
 		input:            inputController,
 		logger:           logger,
-		videoCodec:       videoCodec,
 		audioCodec:       audioCodec,
 		ctx:              ctx,
 		cancel:           cancel,
@@ -295,15 +282,14 @@ func (s *Service) Run(ctx context.Context) error {
 				}
 				return errors.New("media sample stream stopped")
 			}
-			if sample.Codec != s.cfg.Codec {
-				return fmt.Errorf("media sample codec %q does not match configured WebRTC codec %q", sample.Codec, s.cfg.Codec)
-			}
-			if sample.Duration <= 0 {
-				s.logger.Warn("dropping media sample without a positive duration")
+			if sample.ProducedAt.IsZero() {
+				s.logger.Warn("dropping media sample without a production timestamp")
 				continue
 			}
 			for _, peer := range s.peerSnapshot() {
-				peer.enqueueVideo(sample)
+				if peer.videoCodec == sample.Codec {
+					peer.enqueueVideo(sample)
+				}
 			}
 		case sample, ok := <-audioSamples:
 			if !ok {
@@ -365,14 +351,34 @@ func (s *Service) PeerCount() int {
 	return s.count
 }
 
-func (s *Service) newPeerConnection() (*pion.PeerConnection, error) {
+func videoCodecCapability(codec string) pion.RTPCodecCapability {
+	capability := pion.RTPCodecCapability{
+		MimeType:  pion.MimeTypeVP8,
+		ClockRate: 90000,
+		RTCPFeedback: []pion.RTCPFeedback{
+			{Type: pion.TypeRTCPFBNACK},
+			{Type: pion.TypeRTCPFBNACK, Parameter: "pli"},
+			{Type: pion.TypeRTCPFBCCM, Parameter: "fir"},
+		},
+	}
+	if codec == media.CodecH264 {
+		capability.MimeType = pion.MimeTypeH264
+		capability.SDPFmtpLine = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=" + media.H264SDPProfileLevelID
+	}
+	return capability
+}
+
+func (s *Service) newPeerConnection(
+	codec string,
+	videoCodec pion.RTPCodecCapability,
+) (*pion.PeerConnection, error) {
 	mediaEngine := &pion.MediaEngine{}
 	payloadType := pion.PayloadType(vp8PayloadType)
-	if s.cfg.Codec == media.CodecH264 {
+	if codec == media.CodecH264 {
 		payloadType = h264PayloadType
 	}
 	if err := mediaEngine.RegisterCodec(pion.RTPCodecParameters{
-		RTPCodecCapability: s.videoCodec,
+		RTPCodecCapability: videoCodec,
 		PayloadType:        payloadType,
 	}, pion.RTPCodecTypeVideo); err != nil {
 		return nil, fmt.Errorf("register video codec: %w", err)
@@ -388,7 +394,7 @@ func (s *Service) newPeerConnection() (*pion.PeerConnection, error) {
 
 	registry := &interceptor.Registry{}
 	if err := pion.RegisterDefaultInterceptors(mediaEngine, registry); err != nil {
-		return nil, fmt.Errorf("register WebRTC interceptors: %w", err)
+		return nil, fmt.Errorf("configure WebRTC interceptors: %w", err)
 	}
 
 	var settings pion.SettingEngine
@@ -411,11 +417,15 @@ func (s *Service) newPeerConnection() (*pion.PeerConnection, error) {
 		configuration.ICEServers = []pion.ICEServer{iceServer}
 	}
 
-	return pion.NewAPI(
+	connection, err := pion.NewAPI(
 		pion.WithMediaEngine(mediaEngine),
 		pion.WithSettingEngine(settings),
 		pion.WithInterceptorRegistry(registry),
 	).NewPeerConnection(configuration)
+	if err != nil {
+		return nil, err
+	}
+	return connection, nil
 }
 
 func (s *Service) reservePeer() (uint64, error) {
@@ -468,6 +478,15 @@ func (s *Service) peerSnapshot() []*peer {
 		peers = append(peers, peer)
 	}
 	return peers
+}
+
+func (s *Service) closePeerForCodecChange(peer *peer, generation uint64) {
+	s.qualityMu.Lock()
+	defer s.qualityMu.Unlock()
+	if s.qualityGeneration != generation {
+		return
+	}
+	peer.closeWith(websocket.CloseServiceRestart, "video codec changed")
 }
 
 func (s *Service) requestKeyframe(reason string) {

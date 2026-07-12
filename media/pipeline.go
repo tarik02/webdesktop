@@ -1,387 +1,156 @@
 package media
 
 import (
-	"errors"
 	"fmt"
 	"runtime"
-	"strconv"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-gst/go-gst/gst"
-	gstapp "github.com/go-gst/go-gst/gst/app"
-	"github.com/tarik02/webdesktop/capture"
 	"go.uber.org/zap"
 )
 
-const pipelineBusPollInterval = 100 * time.Millisecond
+const (
+	pipelineBusPollInterval = 100 * time.Millisecond
+	pipelineTraceInterval   = 5 * time.Second
+)
 
-type videoPipeline struct {
-	pipeline       *gst.Pipeline
-	elements       []*gst.Element
-	stream         *capture.Stream
-	encoder        *gst.Element
-	keyframeTarget *gst.Element
-	codec          string
-	emit           func(Sample)
-	logger         *zap.Logger
-
-	stop        chan struct{}
-	monitorDone chan struct{}
-	done        chan struct{}
-	closeOnce   sync.Once
-	doneOnce    sync.Once
-	errMu       sync.RWMutex
-	err         error
+type videoFlowTrace struct {
+	buffers        atomic.Uint64
+	invalidPTS     atomic.Uint64
+	duplicatePTS   atomic.Uint64
+	ptsRegressions atomic.Uint64
+	lastArrival    atomic.Int64
+	lastWallGap    atomic.Int64
+	maxWallGap     atomic.Int64
+	lastPTS        atomic.Int64
+	lastPTSGap     atomic.Int64
+	maxPTSGap      atomic.Int64
+	maxPTSRegress  atomic.Int64
+	havePTS        atomic.Bool
+	lastOffset     atomic.Int64
+	haveOffset     atomic.Bool
+	repeatedOffset atomic.Uint64
+	offsetChanges  atomic.Uint64
+	bytes          atomic.Uint64
+	keyframes      atomic.Uint64
 }
 
-// newVideoPipeline takes ownership of stream on both success and failure.
-func newVideoPipeline(
-	stream *capture.Stream,
-	quality Quality,
-	tuning Tuning,
-	emit func(Sample),
-	logger *zap.Logger,
-) (_ *videoPipeline, err error) {
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, stream.Close())
-		}
-	}()
-
-	if err := quality.Validate(); err != nil {
-		return nil, err
+func (t *videoFlowTrace) observe(buffer *gst.Buffer) {
+	t.buffers.Add(1)
+	t.bytes.Add(uint64(buffer.GetSize()))
+	if !buffer.HasFlags(gst.BufferFlagDeltaUnit) {
+		t.keyframes.Add(1)
 	}
 
-	elements, err := gst.NewElementMany(
-		"pipewiresrc",
-		"queue",
-		"videoconvert",
-		"videorate",
-		"videoscale",
-		"capsfilter",
+	now := time.Now().UnixNano()
+	if previous := t.lastArrival.Swap(now); previous > 0 {
+		gap := now - previous
+		t.lastWallGap.Store(gap)
+		for previousMax := t.maxWallGap.Load(); gap > previousMax; previousMax = t.maxWallGap.Load() {
+			if t.maxWallGap.CompareAndSwap(previousMax, gap) {
+				break
+			}
+		}
+	}
+
+	if offset := buffer.Offset(); offset >= 0 {
+		if t.haveOffset.Swap(true) {
+			if offset == t.lastOffset.Swap(offset) {
+				t.repeatedOffset.Add(1)
+			} else {
+				t.offsetChanges.Add(1)
+			}
+		} else {
+			t.lastOffset.Store(offset)
+		}
+	}
+
+	pts := buffer.PresentationTimestamp().AsDuration()
+	if pts == nil {
+		t.invalidPTS.Add(1)
+		return
+	}
+	currentPTS := int64(*pts)
+	if t.havePTS.Swap(true) {
+		gap := currentPTS - t.lastPTS.Swap(currentPTS)
+		t.lastPTSGap.Store(gap)
+		if gap == 0 {
+			t.duplicatePTS.Add(1)
+		} else if gap < 0 {
+			t.ptsRegressions.Add(1)
+			regression := -gap
+			for previousMax := t.maxPTSRegress.Load(); regression > previousMax; previousMax = t.maxPTSRegress.Load() {
+				if t.maxPTSRegress.CompareAndSwap(previousMax, regression) {
+					break
+				}
+			}
+		} else {
+			for previousMax := t.maxPTSGap.Load(); gap > previousMax; previousMax = t.maxPTSGap.Load() {
+				if t.maxPTSGap.CompareAndSwap(previousMax, gap) {
+					break
+				}
+			}
+		}
+		return
+	}
+	t.lastPTS.Store(currentPTS)
+}
+
+func addVideoTraceProbe(
+	element *gst.Element,
+	padName string,
+	trace *videoFlowTrace,
+	afterObserve func(*gst.Buffer),
+) (*gst.Pad, error) {
+	pad := element.GetStaticPad(padName)
+	if pad == nil {
+		return nil, fmt.Errorf("get %s %s pad for tracing", element.GetName(), padName)
+	}
+	runtime.SetFinalizer(pad.GObject(), nil)
+
+	if pad.AddProbe(gst.PadProbeTypeBuffer, func(_ *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+		if buffer := info.GetBuffer(); buffer != nil {
+			if afterObserve != nil {
+				afterObserve(buffer)
+			}
+			trace.observe(buffer)
+		}
+		return gst.PadProbeOK
+	}) == 0 {
+		pad.Unref()
+		return nil, fmt.Errorf("add %s %s buffer probe", element.GetName(), padName)
+	}
+	return pad, nil
+}
+
+func appendVideoFlowTraceFields(
+	fields []zap.Field,
+	prefix string,
+	trace *videoFlowTrace,
+	now int64,
+) []zap.Field {
+	lastArrival := trace.lastArrival.Load()
+	var lastArrivalAge time.Duration
+	if lastArrival > 0 {
+		lastArrivalAge = time.Duration(now - lastArrival)
+	}
+	return append(fields,
+		zap.Uint64(prefix+"_buffers", trace.buffers.Load()),
+		zap.Duration(prefix+"_last_arrival_age", lastArrivalAge),
+		zap.Duration(prefix+"_last_wall_gap", time.Duration(trace.lastWallGap.Load())),
+		zap.Duration(prefix+"_max_wall_gap", time.Duration(trace.maxWallGap.Load())),
+		zap.Duration(prefix+"_last_pts", time.Duration(trace.lastPTS.Load())),
+		zap.Duration(prefix+"_last_pts_gap", time.Duration(trace.lastPTSGap.Load())),
+		zap.Duration(prefix+"_max_pts_gap", time.Duration(trace.maxPTSGap.Load())),
+		zap.Duration(prefix+"_max_pts_regression", time.Duration(trace.maxPTSRegress.Load())),
+		zap.Uint64(prefix+"_invalid_pts", trace.invalidPTS.Load()),
+		zap.Uint64(prefix+"_duplicate_pts", trace.duplicatePTS.Load()),
+		zap.Uint64(prefix+"_pts_regressions", trace.ptsRegressions.Load()),
+		zap.Int64(prefix+"_last_offset", trace.lastOffset.Load()),
+		zap.Uint64(prefix+"_repeated_offset", trace.repeatedOffset.Load()),
+		zap.Uint64(prefix+"_offset_changes", trace.offsetChanges.Load()),
+		zap.Uint64(prefix+"_bytes", trace.bytes.Load()),
+		zap.Uint64(prefix+"_keyframes", trace.keyframes.Load()),
 	)
-	if err != nil {
-		return nil, fmt.Errorf("create raw video elements: %w", err)
-	}
-	source := elements[0]
-	queue := elements[1]
-	convert := elements[2]
-	rate := elements[3]
-	scale := elements[4]
-	rawFilter := elements[5]
-
-	if err := source.SetProperty("fd", stream.PipeWireFD); err != nil {
-		return nil, fmt.Errorf("set pipewiresrc fd: %w", err)
-	}
-	if stream.HasPipeWireSerial {
-		if err := source.SetProperty("target-object", strconv.FormatUint(stream.PipeWireSerial, 10)); err != nil {
-			return nil, fmt.Errorf("set pipewiresrc target object: %w", err)
-		}
-	} else {
-		if err := source.SetProperty("path", strconv.FormatUint(uint64(stream.NodeID), 10)); err != nil {
-			return nil, fmt.Errorf("set pipewiresrc node path: %w", err)
-		}
-	}
-	if err := source.SetProperty("do-timestamp", true); err != nil {
-		return nil, fmt.Errorf("enable pipewiresrc timestamps: %w", err)
-	}
-
-	if err := queue.SetProperty("max-size-buffers", uint(2)); err != nil {
-		return nil, fmt.Errorf("set queue buffer limit: %w", err)
-	}
-	if err := queue.SetProperty("max-size-bytes", uint(0)); err != nil {
-		return nil, fmt.Errorf("disable queue byte limit: %w", err)
-	}
-	if err := queue.SetProperty("max-size-time", uint64(0)); err != nil {
-		return nil, fmt.Errorf("disable queue time limit: %w", err)
-	}
-	queue.SetArg("leaky", "downstream")
-
-	rawCaps := gst.NewCapsFromString(fmt.Sprintf(
-		"video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1",
-		quality.Width,
-		quality.Height,
-		quality.Framerate,
-	))
-	if rawCaps == nil {
-		return nil, errors.New("create raw video caps")
-	}
-	if err := rawFilter.SetProperty("caps", rawCaps); err != nil {
-		return nil, fmt.Errorf("set raw video caps: %w", err)
-	}
-
-	encoderFactory := "vp8enc"
-	encodedCapsString := "video/x-vp8"
-	if quality.Codec == CodecH264 {
-		encoderFactory = "x264enc"
-		encodedCapsString = "video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)" + H264Level
-	}
-
-	encoder, err := gst.NewElementWithName(encoderFactory, "video-encoder")
-	if err != nil {
-		return nil, fmt.Errorf("create %s: %w", encoderFactory, err)
-	}
-
-	switch quality.Codec {
-	case CodecVP8:
-		if err := encoder.SetProperty("target-bitrate", quality.BitrateKbps*1000); err != nil {
-			return nil, fmt.Errorf("set VP8 target bitrate: %w", err)
-		}
-		if err := encoder.SetProperty("cpu-used", tuning.VP8CPUUsed); err != nil {
-			return nil, fmt.Errorf("set VP8 CPU tuning: %w", err)
-		}
-		if err := encoder.SetProperty("threads", tuning.Threads); err != nil {
-			return nil, fmt.Errorf("set VP8 encoder threads: %w", err)
-		}
-		if err := encoder.SetProperty("deadline", int64(1)); err != nil {
-			return nil, fmt.Errorf("set VP8 realtime deadline: %w", err)
-		}
-		if err := encoder.SetProperty("lag-in-frames", 0); err != nil {
-			return nil, fmt.Errorf("disable VP8 frame lag: %w", err)
-		}
-		if err := encoder.SetProperty("keyframe-max-dist", tuning.KeyframeInterval); err != nil {
-			return nil, fmt.Errorf("set VP8 keyframe interval: %w", err)
-		}
-		encoder.SetArg("end-usage", "cbr")
-		encoder.SetArg("error-resilient", "partitions")
-	case CodecH264:
-		if err := encoder.SetProperty("bitrate", uint(quality.BitrateKbps)); err != nil {
-			return nil, fmt.Errorf("set H.264 bitrate: %w", err)
-		}
-		if err := encoder.SetProperty("threads", uint(tuning.Threads)); err != nil {
-			return nil, fmt.Errorf("set H.264 encoder threads: %w", err)
-		}
-		if err := encoder.SetProperty("key-int-max", uint(tuning.KeyframeInterval)); err != nil {
-			return nil, fmt.Errorf("set H.264 keyframe interval: %w", err)
-		}
-		if err := encoder.SetProperty("bframes", uint(0)); err != nil {
-			return nil, fmt.Errorf("disable H.264 B-frames: %w", err)
-		}
-		if err := encoder.SetProperty("byte-stream", true); err != nil {
-			return nil, fmt.Errorf("enable H.264 byte stream output: %w", err)
-		}
-		encoder.SetArg("tune", "zerolatency")
-		encoder.SetArg("speed-preset", tuning.H264SpeedPreset)
-	}
-
-	encodedFilter, err := gst.NewElement("capsfilter")
-	if err != nil {
-		return nil, fmt.Errorf("create encoded video caps filter: %w", err)
-	}
-	encodedCaps := gst.NewCapsFromString(encodedCapsString)
-	if encodedCaps == nil {
-		return nil, errors.New("create encoded video caps")
-	}
-	if err := encodedFilter.SetProperty("caps", encodedCaps); err != nil {
-		return nil, fmt.Errorf("set encoded video caps: %w", err)
-	}
-
-	sink, err := gstapp.NewAppSink()
-	if err != nil {
-		return nil, fmt.Errorf("create encoded video app sink: %w", err)
-	}
-	sink.SetMaxBuffers(4)
-	sink.SetDrop(true)
-	sink.SetWaitOnEOS(false)
-	if err := sink.SetProperty("sync", false); err != nil {
-		return nil, fmt.Errorf("disable app sink synchronization: %w", err)
-	}
-
-	pipeline, err := gst.NewPipeline("webdesktop-video")
-	if err != nil {
-		return nil, err
-	}
-	if err := pipeline.AddMany(
-		source,
-		queue,
-		convert,
-		rate,
-		scale,
-		rawFilter,
-		encoder,
-		encodedFilter,
-		sink.Element,
-	); err != nil {
-		return nil, fmt.Errorf("add video pipeline elements: %w", err)
-	}
-	if err := gst.ElementLinkMany(
-		source,
-		queue,
-		convert,
-		rate,
-		scale,
-		rawFilter,
-		encoder,
-		encodedFilter,
-		sink.Element,
-	); err != nil {
-		return nil, fmt.Errorf("link video pipeline: %w", err)
-	}
-
-	result := &videoPipeline{
-		pipeline: pipeline,
-		elements: []*gst.Element{
-			source,
-			queue,
-			convert,
-			rate,
-			scale,
-			rawFilter,
-			encoder,
-			encodedFilter,
-			sink.Element,
-		},
-		stream:         stream,
-		encoder:        encoder,
-		keyframeTarget: sink.Element,
-		codec:          quality.Codec,
-		emit:           emit,
-		logger:         logger,
-		stop:           make(chan struct{}),
-		monitorDone:    make(chan struct{}),
-		done:           make(chan struct{}),
-	}
-	sink.SetCallbacks(&gstapp.SinkCallbacks{
-		NewSampleFunc: result.handleSample,
-	})
-
-	go result.monitor()
-	if err := pipeline.SetState(gst.StatePlaying); err != nil {
-		_ = result.Close()
-		return nil, err
-	}
-
-	return result, nil
-}
-
-func (p *videoPipeline) handleSample(sink *gstapp.Sink) gst.FlowReturn {
-	sample := sink.PullSample()
-	if sample == nil {
-		return gst.FlowEOS
-	}
-	runtime.SetFinalizer(sample, nil)
-	defer sample.Unref()
-
-	buffer := sample.GetBuffer()
-	runtime.SetFinalizer(buffer, nil)
-	defer buffer.Unref()
-
-	var pts time.Duration
-	if value := buffer.PresentationTimestamp().AsDuration(); value != nil {
-		pts = *value
-	}
-	var duration time.Duration
-	if value := buffer.Duration().AsDuration(); value != nil {
-		duration = *value
-	}
-
-	p.emit(Sample{
-		Data:     buffer.Bytes(),
-		Codec:    p.codec,
-		PTS:      pts,
-		Duration: duration,
-		KeyFrame: !buffer.HasFlags(gst.BufferFlagDeltaUnit),
-	})
-	return gst.FlowOK
-}
-
-func (p *videoPipeline) monitor() {
-	defer close(p.monitorDone)
-
-	bus := p.pipeline.GetPipelineBus()
-	for {
-		select {
-		case <-p.stop:
-			return
-		default:
-		}
-
-		message := bus.TimedPop(gst.ClockTime(pipelineBusPollInterval))
-		if message == nil {
-			continue
-		}
-
-		switch message.Type() {
-		case gst.MessageError:
-			p.fail(fmt.Errorf("gstreamer %s: %w", message.Source(), message.ParseError()))
-			return
-		case gst.MessageEOS:
-			p.fail(errors.New("gstreamer video pipeline reached end of stream"))
-			return
-		case gst.MessageWarning:
-			p.logger.Warn("gstreamer warning",
-				zap.String("source", message.Source()),
-				zap.Error(message.ParseWarning()),
-			)
-		}
-	}
-}
-
-func (p *videoPipeline) SetBitrate(bitrateKbps int) error {
-	switch p.codec {
-	case CodecVP8:
-		return p.encoder.SetProperty("target-bitrate", bitrateKbps*1000)
-	case CodecH264:
-		return p.encoder.SetProperty("bitrate", uint(bitrateKbps))
-	default:
-		return fmt.Errorf("unsupported live bitrate update for codec %q", p.codec)
-	}
-}
-
-func (p *videoPipeline) RequestKeyframe() error {
-	if !requestGStreamerKeyframe(p.keyframeTarget) {
-		return errors.New("GStreamer rejected the force-key-unit event")
-	}
-	return nil
-}
-
-func (p *videoPipeline) Done() <-chan struct{} {
-	return p.done
-}
-
-func (p *videoPipeline) Err() error {
-	p.errMu.RLock()
-	defer p.errMu.RUnlock()
-	return p.err
-}
-
-func (p *videoPipeline) Close() error {
-	p.closeOnce.Do(func() {
-		close(p.stop)
-		if err := p.pipeline.SetState(gst.StateNull); err != nil {
-			p.setErr(fmt.Errorf("stop gstreamer video pipeline: %w", err))
-		}
-		<-p.monitorDone
-
-		pipelineObject := p.pipeline.GObject()
-		runtime.SetFinalizer(pipelineObject, nil)
-		p.pipeline.Unref()
-		for _, element := range p.elements {
-			elementObject := element.GObject()
-			runtime.SetFinalizer(elementObject, nil)
-			element.Unref()
-		}
-		if err := p.stream.Close(); err != nil {
-			p.setErr(fmt.Errorf("close pipeline PipeWire remote: %w", err))
-		}
-
-		p.doneOnce.Do(func() {
-			close(p.done)
-		})
-	})
-	return p.Err()
-}
-
-func (p *videoPipeline) fail(err error) {
-	p.setErr(err)
-	p.doneOnce.Do(func() {
-		close(p.done)
-	})
-}
-
-func (p *videoPipeline) setErr(err error) {
-	p.errMu.Lock()
-	defer p.errMu.Unlock()
-	p.err = errors.Join(p.err, err)
 }

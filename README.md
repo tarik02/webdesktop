@@ -2,16 +2,17 @@
 
 `webdesktop` streams an existing KDE Plasma Wayland desktop over WebRTC. It
 uses xdg-desktop-portal ScreenCast for monitor capture, owns the portal
-PipeWire remote for the lifetime of one shared GStreamer pipeline, and encodes
-video in software as VP8 or H.264. Remote pointer and keyboard events use the
-xdg-desktop-portal RemoteDesktop interface, `ConnectToEIS`, and the system
-libei library. Optional desktop audio uses `pulsesrc` through PipeWire's
-PulseAudio-compatible server and software Opus encoding.
+PipeWire remote for the lifetime of one persistent capture pipeline, and feeds
+the newest captured frame to an independent encoder pipeline. VP8 uses a
+software encoder. H.264 uses GStreamer's VA encoder. Remote pointer and keyboard
+events use the xdg-desktop-portal RemoteDesktop interface, `ConnectToEIS`, and
+the system libei library. Optional desktop audio uses `pulsesrc` through
+PipeWire's PulseAudio-compatible server and software Opus encoding.
 
-The service includes WebSocket signaling and a versioned data-channel protocol
-for video quality and exclusive input control. It has no frontend, remote
-unlock, built-in authentication, or TLS termination. Audio is disabled by
-default.
+The service includes an embedded production SPA, WebSocket signaling, and a
+versioned data-channel protocol for video quality and exclusive input control.
+It has no remote unlock, built-in authentication, or TLS termination. Audio is
+disabled by default.
 
 ## Commands
 
@@ -23,11 +24,20 @@ webdesktop version
 The default HTTP address is `127.0.0.1:8080`. The running service exposes:
 
 - `GET /healthz`
+- `GET /api/config`
+- `GET /api/status`
 - `GET /webrtc`, upgraded to the signaling WebSocket by default
+- `GET /`, the embedded SPA with history fallback
 
 The health endpoint starts while desktop capture authorization is pending.
 
 ## Plasma portal authorization
+
+The packaged application ID is `io.github.tarik02.webdesktop`. Before its first
+portal call, the service registers that identity on its D-Bus connection
+through `org.freedesktop.host.portal.Registry`. The package installs the
+matching `io.github.tarik02.webdesktop.desktop` entry. Its `Exec` command starts
+the same packaged binary used by the systemd service.
 
 Input is enabled by default. `webdesktop serve` creates a RemoteDesktop portal
 session, calls ScreenCast `SelectSources` for one monitor, calls RemoteDesktop
@@ -37,14 +47,58 @@ devices and ScreenCast stream. The service then opens the PipeWire remote and
 calls `ConnectToEIS`. Media and input use that one authorized portal session.
 Closing it stops both.
 
-KDE Plasma shows its normal remote-desktop consent dialog in the active
-graphical session. A user must be present in the active, unlocked session to
-select the monitor and authorize input. Set `input.enabled: false` for the
-ScreenCast-only CreateSession, SelectSources, Start, and OpenPipeWireRemote
-flow.
+The service requests portal persistence until explicitly revoked. The normal
+bootstrap on KDE Plasma 6.7.1 is one approval in the active unlocked session.
+Keep "Allow restoring on future sessions" checked and select Approve.
 
-`webdesktop` does not request persistent portal permission and cannot authorize
-capture at the login or lock screen. It does not provide unattended remote
+An operator can instead bootstrap a trusted unattended installation with KDE's
+application-specific remote-desktop permission:
+
+```bash
+flatpak permission-set \
+  kde-authorized remote-desktop \
+  io.github.tarik02.webdesktop yes
+systemctl --user restart webdesktop.service
+```
+
+Wait until `/api/status` reports `ready: true` and the restore state exists,
+then remove the bootstrap permission and restart:
+
+```bash
+flatpak permission-remove \
+  kde-authorized remote-desktop \
+  io.github.tarik02.webdesktop
+systemctl --user restart webdesktop.service
+```
+
+This grants only the packaged application ID and leaves the portal in the
+capture and input path. It does not disable consent globally or call KWin's
+private screenshot or EIS interfaces. Removing the permission after the first
+successful launch proves later unattended starts use the portal restore token.
+The webdesktop process never changes KDE's permission store itself.
+
+Either bootstrap path makes the portal return a single-use restore token.
+Webdesktop stores it at
+`$XDG_STATE_HOME/webdesktop/portal-restore.json`, or
+`~/.local/state/webdesktop/portal-restore.json` when `XDG_STATE_HOME` is unset.
+The state file and directory use modes 0600 and 0700.
+
+Each later launch keeps the old token until the portal returns, then atomically
+writes the replacement token. An interrupted launch can therefore retry the
+old token if KDE had not consumed it yet. The stored state includes the stable
+application ID, monitor sharing, and the requested pointer and keyboard
+capabilities. Changing those values discards the old token and opens the normal
+consent flow. If KDE cannot restore a token, it prompts normally.
+
+KWin's `X-KDE-Wayland-Interfaces` and
+`X-KDE-DBUS-Restricted-Interfaces` desktop fields are not required for this
+application. Webdesktop does not connect to KWin's restricted protocols or
+D-Bus screenshot API directly. The KDE portal owns those compositor-facing
+permissions.
+
+Set `input.enabled: false` for the ScreenCast-only CreateSession,
+SelectSources, Start, and OpenPipeWireRemote flow. Webdesktop cannot authorize
+capture at the login or lock screen and does not provide unattended remote
 unlock. Input works only while the authorized Plasma session is active and
 unlocked. If the user denies or cancels the portal dialog, the service exits
 and closes signaling and all peers.
@@ -57,41 +111,74 @@ starting.
 
 ## WebRTC behavior
 
-The configured video codec is the only codec registered with Pion. VP8 frames
-use the VP8 RTP payloader. H.264 uses constrained-baseline Annex-B access units
-from `x264enc` and packetization mode 1. WebRTC signaling uses the
-libwebrtc-compatible constrained-baseline identifier
-`profile-level-id=42e028`, Level 4.0, for the lifetime of every peer
+Each peer registers only the codec selected when that connection starts. VP8
+frames use the VP8 RTP payloader. H.264 uses constrained-baseline Annex-B
+access units from `vah264enc` and packetization mode 1. WebRTC signaling uses
+the libwebrtc-compatible constrained-baseline identifier
+`profile-level-id=42e02a`, Level 4.2, for the lifetime of every peer
 connection. Browser offers such as `42e01f` are accepted when they include
-`level-asymmetry-allowed=1`; the answer advertises `42e028`. Offers at Level
-4.0 or higher do not need level asymmetry.
+`level-asymmetry-allowed=1`; the answer advertises `42e02a`. Offers at Level
+4.2 or higher do not need level asymmetry.
 
-The GStreamer caps force constrained-baseline Level 4.0. x264 writes
-`42c028` in the SPS. `42c028` and the negotiated `42e028` both identify
-constrained-baseline Level 4.0 bitstreams; the extra `42e0` constraint flag is
+The GStreamer caps force constrained-baseline Level 4.2. The encoder writes
+`42c02a` in the SPS. `42c02a` and the negotiated `42e02a` both identify
+constrained-baseline Level 4.2 bitstreams; the extra `42e0` constraint flag is
 the canonical form used by libwebrtc SDP and lets Pion match browser offers.
 
 All peers share one encoded video stream and, when enabled, one encoded audio
-stream. Each peer has separate bounded video and audio queues, RTP packetizers,
-and writers. A slow TURN/TCP or TURN/TLS peer can drop only its own queued
-samples. It cannot block capture, another peer, the other media track, or
-service shutdown. Connecting a viewer does not create another GStreamer
-pipeline. Each WebSocket owns one peer connection, and the default maximum is
-two peers.
+stream. The persistent PipeWire pipeline copies each raw buffer into a
+capture appsink that keeps only its newest sample. An application-owned
+single-sample slot feeds each independent encoder through a one-buffer leaky
+appsrc. Encoder slowdown therefore drops obsolete raw frames without blocking
+PipeWire or accumulating latency. Encoded samples use blocking, unbuffered
+handoffs through media fanout and each peer writer. There is no per-peer video
+queue or packet pacer. A peer waiting for its first decodable frame ignores
+inter-frames until the requested keyframe arrives. Connecting a viewer does
+not create another encoder pipeline. Each WebSocket owns one peer connection,
+and the default maximum is two peers.
 
-Per-peer RTP timing follows encoded sample PTS gaps, so queue drops preserve
-elapsed media time. A PTS regression or a jump over 10 seconds is treated as a
-pipeline discontinuity and advances by the encoded sample duration instead.
-This handling is independent for video and audio.
+Bitrate-only changes update the active encoder while it is PLAYING. H.264
+updates its requested CPB size and target bitrate together. `vah264enc` clamps
+the CPB to its HRD-compliant minimum and reports the effective value in trace
+snapshots. Resolution, frame-rate, and codec changes build a new encoder
+pipeline against the same latest-frame slot. The candidate receives the
+current frame immediately, starts encoding, and waits for an IDR before the
+service activates it and retires the previous encoder. PipeWire capture
+remains linked and PLAYING throughout the change. A candidate that fails or
+does not produce an IDR within five seconds is discarded without replacing
+the active encoder. Bitrate, resolution, and frame-rate changes keep the
+existing peer when its codec remains compatible. Codec changes require a new
+SDP exchange.
+
+RTP writes are immediate. Pion retains recent RTP for NACK retransmission. VP8
+uses a short rate-control buffer, bounded intra frames, the fastest realtime
+CPU setting, and eight encoder threads by default. H.264 uses VA CBR rate
+control with GStreamer's HRD-compliant CPB, no B-frames, one reference frame,
+four slices, disabled CABAC and macroblock bitrate control, and
+constrained-baseline output.
+
+`pipewiresrc` copies portal buffers and uses a keepalive interval derived from
+the configured frame rate. When KWin's portal stream is damage-driven, the
+source resends its latest buffer instead of leaving the encoder and RTP stream
+idle. `videorate` remains drop-only and caps each encoder branch at the
+configured rate. The capture appsink, latest-frame slot, and encoder appsrc all
+discard obsolete raw frames. The encoded appsink is bounded and non-leaky so
+it does not discard part of an encoded reference chain.
+
+Video RTP timing follows the monotonic production gap between encoded samples.
+Before packetizing the current access unit, the track skips exactly that
+elapsed RTP time and gives the packetizer no additional nominal frame advance.
+GStreamer PTS remains available for diagnostics, but PTS duplicates and the
+reset from each replacement pipeline cannot distort the RTP clock. Audio RTP
+continues to advance from each Opus sample duration.
 
 The service reads RTCP from every video and audio sender. PLI, FIR, and a newly
 connected peer request a keyframe from the active GStreamer video encoder. The
 encoder receives an upstream force-key-unit event with headers requested,
-which works for both VP8 and H.264. Pion's default sender-report interceptor
-maps each track's RTP clock to NTP time. The tracks use the same WebRTC media
-stream ID. This gives browsers the standard A/V clock correlation, but capture
-latency between the independent pipelines is not calibrated for perfect lip
-sync.
+which works for both VP8 and H.264. Pion's sender-report interceptor maps each
+track's RTP clock to NTP time. The tracks use the same WebRTC media stream ID.
+This gives browsers the standard A/V clock correlation, but capture latency
+between the independent pipelines is not calibrated for perfect lip sync.
 
 ## Optional desktop audio
 
@@ -179,6 +266,29 @@ pre-offer candidates until it installs the remote description. Server
 candidates are held until the answer has been written. Browser clients should
 ignore the final `icecandidate` event where `event.candidate` is `null`.
 
+When `tracing.enabled` is true, the embedded client sends bounded structured
+diagnostics over the same signaling socket:
+
+```json
+{
+  "version": 1,
+  "type": "client-log",
+  "level": "debug",
+  "event": "performance.snapshot",
+  "details": {
+    "fps": "30.0",
+    "bitrate_bps": "3864000",
+    "rtt_ms": "4.1"
+  }
+}
+```
+
+Levels are `debug`, `info`, `warn`, or `error`. Event names are limited to 128
+bytes. Details are string values with at most 32 entries, 64 bytes per key, and
+512 bytes per value. The embedded client never sends SDP, full ICE candidates,
+key values, pointer coordinates, or per-frame and per-motion events. The server
+rejects `client-log` when tracing is disabled.
+
 Structured signaling error:
 
 ```json
@@ -251,29 +361,39 @@ Errors preserve the request ID:
 }
 ```
 
-`codec` is accepted only so the service can return the specific
-`codec_static` error. Changing codec requires SDP renegotiation and is not
-implemented. Unknown message types and fields are rejected.
+`codec` accepts `vp8` or `h264`. A codec update starts a replacement encoder
+branch and switches after its first IDR. The browser client then reconnects
+automatically because the new codec needs a new SDP offer and answer. Other
+peers using the old codec are closed. Unknown message types and fields are
+rejected.
 
-H.264 quality must remain inside Level 4.0 for the full peer lifetime:
+H.264 quality must remain inside Level 4.2 for the full peer lifetime:
 
-- no more than 256 rounded macroblocks in either frame dimension
-- no more than 8192 macroblocks per frame
-- no more than 245760 macroblocks per second
-- no more than 20000 Kbit/s
+- no more than 263 rounded macroblocks in either frame dimension
+- no more than 8704 macroblocks per frame
+- no more than 522240 macroblocks per second
+- no more than 50000 Kbit/s
 
 Macroblock dimensions round width and height up to multiples of 16. For
-example, 1920x1080 at 30 fps uses 244800 macroblocks per second and fits, while
-1920x1080 at 60 fps does not. A 7680x240 frame exceeds the 256-macroblock
-width limit even though its total macroblock count fits. Startup and control
-updates reject such dimensions before changing the active pipeline.
+example, 1920x1080 at 60 fps uses 489600 macroblocks per second and fits. A
+7680x240 frame exceeds the 263-macroblock width limit even though its total
+macroblock count fits. Startup and control updates reject such dimensions
+before changing the active pipeline.
 An incompatible control update returns `h264_level_incompatible` without
 changing the stream.
 
 Quality is global because every viewer receives the same encoded stream. A
 quality update from one peer changes the stream for every peer. Bitrate-only
-updates modify the live encoder. Resolution or frame-rate changes rebuild the
-single pipeline against the same portal session.
+updates retune the active encoder. H.264 updates its requested CPB size before
+its target bitrate, and `vah264enc` applies its HRD minimum. Resolution and
+frame-rate changes use an IDR-gated replacement encoder branch. The persistent
+PipeWire capture pipeline remains active and feeds both branches during the
+short overlap. A same-codec update does not create another peer.
+
+VP8 bitrate accepts any whole Kbit/s value from 100 through 2147483, the
+largest target that fits the encoder's signed 32-bit bits-per-second property.
+H.264 bitrate accepts 100 through 50000 Kbit/s under the negotiated Level 4.2
+limit.
 
 Only one peer can own input because every viewer shares the same desktop. A
 connected peer with an open `input` channel acquires the lease through
@@ -425,11 +545,12 @@ include the sequence when it was decoded:
 }
 ```
 
-When its bounded queue is full, the worker coalesces adjacent absolute motion,
-relative motion, and continuous scroll where ordering remains unchanged. It
-never drops key, button, or scroll-stop transitions. Overload that would lose
-transition ordering returns `input_overloaded`, releases held state, revokes
-the lease, and closes the input channel.
+The worker always coalesces adjacent absolute motion, relative motion, and
+continuous scroll where ordering remains unchanged. This prevents pointer
+motion from building a stale queue. It never drops key, button, or scroll-stop
+transitions. Overload that would lose transition ordering returns
+`input_overloaded`, releases held state, revokes the lease, and closes the
+input channel.
 
 ## Configuration
 
@@ -471,6 +592,42 @@ Audio settings are static:
 Audio has no runtime quality command. The codec, 48 kHz sample rate, stereo
 channel count, and 20 ms frame duration are fixed.
 
+## Tracing
+
+Tracing is off by default. Enable it with configuration, the
+`WEBDESKTOP_TRACING_ENABLED` environment variable, or
+`--tracing-enabled=true`:
+
+```yaml
+logging:
+  level: debug
+  format: json
+
+tracing:
+  enabled: true
+```
+
+The server then logs WebRTC, ICE, signaling, data-channel, queue, drop, write,
+input, keyframe, NACK, requested encoder bitrate, effective H.264 bitrate and
+CPB, and RTCP receiver-report state. Each active peer writes one snapshot every
+five seconds. The browser sends connection, media, input lease, quality,
+cleanup, error, and performance events through its signaling socket. Browser
+trace output also appears in the ephemeral browser console.
+
+Follow the packaged service logs on Polygon:
+
+```bash
+ssh polygon '
+  export XDG_RUNTIME_DIR=/run/user/$(id -u)
+  export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+  journalctl --user -u webdesktop.service -f -o cat
+'
+```
+
+Client entries use logger name `webrtc.client`, include the server `peer_id`,
+and store browser fields under `client_details`. Disable tracing after the
+problem is captured if the extra five-second snapshots are no longer useful.
+
 The remote-desktop binary defaults to pointer and keyboard control. Embedding
 deployments can set `input.enabled: false` to keep view-only ScreenCast
 behavior.
@@ -482,11 +639,11 @@ origin values use the repeatable `--webrtc-ice-server` and
 `--webrtc-allowed-origin` flags.
 
 The implemented source is `monitor`. Cursor mode can be `embedded` or `hidden`.
-VP8 is the default codec. H.264 uses software `x264enc` with
-constrained-baseline Level 4.0 byte-stream output and a `42c028` SPS. WebRTC
-negotiates the compatible libwebrtc SDP form `42e028`. Startup rejects H.264
-quality outside the limits listed above. Width and height are applied after
-software color conversion, frame-rate normalization, and scaling.
+VP8 is the default codec. H.264 uses `vah264enc` with constrained-baseline
+Level 4.2 byte-stream output and a `42c02a` SPS. WebRTC negotiates the
+compatible libwebrtc SDP form `42e02a`. Startup rejects H.264 quality outside
+the limits listed above. Width and height are applied after color conversion,
+frame-rate normalization, and scaling.
 
 ## Network and security
 
@@ -520,6 +677,43 @@ origins are exact `http://host[:port]` or `https://host[:port]` values. `*`
 allows every origin and should be used only behind another trusted control.
 Origin checks do not authenticate a user.
 
+The Polygon production service currently binds every LAN interface on TCP 8080
+and pins WebRTC ICE to UDP 60000 through 61000. The service config and NixOS
+firewall must use the same UDP range:
+
+```nix
+networking.firewall.allowedTCPPorts = [ 8080 ];
+networking.firewall.allowedUDPPortRanges = [
+  {
+    from = 60000;
+    to = 61000;
+  }
+];
+```
+
+```yaml
+webrtc:
+  udp_port_min: 60000
+  udp_port_max: 61000
+```
+
+Then open `http://polygon.lan:8080/`. Webdesktop has no authentication or TLS,
+so do not forward this port from the router or expose it to an untrusted
+network.
+
+An SSH tunnel remains the safer option when direct LAN access is not wanted:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 polygon
+```
+
+Then open `http://127.0.0.1:8080/`.
+
+To bind every Polygon interface intentionally, set
+`server.listen_address: 0.0.0.0:8080` in the production config and restart the
+user service. Webdesktop has no authentication or TLS, so every host that can
+reach that port can view and control the desktop.
+
 The `webrtc` Go package exposes a media interface, `Service.Run`,
 `Service.Close`, and a Gin `Handler`. An embedding application can mount that
 handler on its own router after its authentication and authorization
@@ -533,6 +727,10 @@ Build the package:
 ```bash
 nix build path:.#
 ```
+
+The package build fetches dependencies from `web/pnpm-lock.yaml` with a fixed
+Nix hash, runs frontend format, lint, typecheck, and production build checks,
+then copies `web/dist` into the Go source used by `go:embed`.
 
 Run the binary without installing it:
 
@@ -562,15 +760,26 @@ defaults are not suitable. The unit passes that exact path to the binary.
 
 The unit uses `WantedBy=`, `After=`, `Requisite=`, and `PartOf=` for
 `graphical-session.target`. It stops with the graphical session and cannot
-start successfully when that target is inactive. D-Bus, the portal, PipeWire,
-and pipewire-pulse are reached through the active user session and their normal
-socket or D-Bus activation. The unit does not hard-code distribution-specific
-service names.
+start successfully when that target is inactive. D-Bus, PipeWire, and
+pipewire-pulse are reached through the active user session and their normal
+socket or D-Bus activation.
+
+The unit orders itself after xdg-desktop-portal and KDE's portal backend. It
+does not restart the shared portal, so starting webdesktop cannot invalidate
+capture sessions owned by Sunshine, KRDP, or other desktop applications.
 
 The unit has no restart policy. A denied portal request or invalid
 configuration stays failed instead of repeatedly reopening the consent dialog.
 `TimeoutStopSec=15s` leaves time for peer, HTTP, GStreamer, libei, and portal
 cleanup after SIGTERM.
+
+The package also installs:
+
+- `$package/share/applications/io.github.tarik02.webdesktop.desktop`
+- `$package/share/webdesktop/config.example.yaml`
+
+Webdesktop creates its private user state directory when the portal returns the
+first restore token.
 
 Disable it with:
 
@@ -593,5 +802,52 @@ go build ./...
 go vet ./...
 ```
 
-`nix flake check path:.` builds the package, runs `go vet ./...`, and verifies
-the packaged systemd user unit. It does not run a test suite.
+Build the frontend before running Go commands directly because the embedded
+package expects `web/dist`:
+
+```bash
+cd web
+pnpm format:check
+pnpm lint
+pnpm typecheck
+pnpm build
+```
+
+`nix flake check path:.` builds the frontend and package, runs `go vet ./...`,
+checks the embedded assets, and validates the packaged systemd unit and desktop
+entry.
+
+The primary test harness is the focused Polygon browser E2E:
+
+```bash
+e2e/polygon.sh
+```
+
+It requires the packaged service and an existing portal restore token. It uses
+an ephemeral agent-browser session through a temporary SSH tunnel and a
+fullscreen GTK4 target forced onto Wayland. The target drives compositor-paced
+full-surface motion, logs real pointer and keyboard input, and acknowledges a
+deterministic color change only after KWin reports presentation. The harness
+checks advancing WebRTC video, optional audio, H.264 1080p60 at 8,000 and
+10,000 Kbit/s, same-peer bitrate cutovers, idle/change latency, quality and
+codec changes, disconnect cleanup, and unattended restoration after a service
+restart. It deletes its browser, tunnel, target, and monitoring process on
+exit.
+
+The longer codec gate requires Firefox in the Polygon user profile:
+
+```bash
+nix profile add --profile ~/.nix-profile nixpkgs#firefox
+e2e/polygon-youtube.sh
+```
+
+It resolves an anonymous progressive Big Buck Bunny media URL from YouTube
+with `yt-dlp`, verifies the source is hosted by `googlevideo.com`, and plays it
+in Firefox with a temporary Selenium profile in the real Plasma session. This
+avoids YouTube's page-level automation cutoff while still exercising a real
+YouTube stream. The gate checks Firefox's media time and the remote browser's
+decoded-frame count. VP8 and H.264 must each play for at least one minute
+without a ten-second freeze, and each connection must render its first frame
+within five seconds. The script removes the temporary Firefox profile,
+Aperture browser, and test files, then restarts the production service from
+its configured VP8 settings.

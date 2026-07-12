@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +20,8 @@ import (
 )
 
 const (
+	ApplicationID = "io.github.tarik02.webdesktop"
+
 	SourceMonitor = "monitor"
 
 	CursorModeHidden   = "hidden"
@@ -31,17 +36,21 @@ const (
 	requestInterface       = "org.freedesktop.portal.Request"
 	sessionInterface       = "org.freedesktop.portal.Session"
 	propertiesInterface    = "org.freedesktop.DBus.Properties"
+	registryInterface      = "org.freedesktop.host.portal.Registry"
 
 	requestResponseSignal = requestInterface + ".Response"
 	sessionClosedSignal   = sessionInterface + ".Closed"
 
-	sourceTypeMonitor  uint32 = 1
-	cursorModeHidden   uint32 = 1
-	cursorModeEmbedded uint32 = 2
-	deviceTypeKeyboard uint32 = 1
-	deviceTypePointer  uint32 = 2
+	sourceTypeMonitor   uint32 = 1
+	cursorModeHidden    uint32 = 1
+	cursorModeEmbedded  uint32 = 2
+	deviceTypeKeyboard  uint32 = 1
+	deviceTypePointer   uint32 = 2
+	persistUntilRevoked uint32 = 2
 
 	portalCleanupTimeout = 2 * time.Second
+	portalCallTimeout    = 10 * time.Second
+	restoreStateVersion  = 1
 )
 
 var (
@@ -83,7 +92,7 @@ func (cfg Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// Stream owns a duplicated PipeWire remote for one media pipeline.
+// Stream owns one PipeWire remote for one media pipeline.
 type Stream struct {
 	PipeWireFD        int
 	NodeID            uint32
@@ -97,7 +106,7 @@ type Stream struct {
 	closeErr  error
 }
 
-// Close releases the per-pipeline PipeWire remote duplicate.
+// Close releases the per-pipeline PipeWire remote.
 func (s *Stream) Close() error {
 	s.closeOnce.Do(func() {
 		s.closeErr = s.remote.Close()
@@ -120,14 +129,14 @@ type InputAuthorization struct {
 	Keyboard bool
 }
 
-// Session owns one portal session and its PipeWire and optional EIS remotes.
+// Session owns one portal session and its optional EIS remote.
 type Session struct {
 	conn         *dbus.Conn
 	path         dbus.ObjectPath
-	remote       *os.File
 	eisRemote    *os.File
 	stream       streamMetadata
 	input        InputAuthorization
+	restore      RestoreStatus
 	signals      chan *dbus.Signal
 	sessionMatch []dbus.MatchOption
 
@@ -137,6 +146,14 @@ type Session struct {
 	stateMu   sync.Mutex
 	closing   bool
 	err       error
+}
+
+// RestoreStatus reports portal identity and restore-token rotation for this session.
+type RestoreStatus struct {
+	ApplicationID  string
+	StatePath      string
+	TokenAttempted bool
+	TokenRotated   bool
 }
 
 // Open runs the xdg-desktop-portal capture flow and returns one monitor stream.
@@ -171,7 +188,6 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 	requestMatchAdded := false
 	sessionMatchAdded := false
 	var sessionPath dbus.ObjectPath
-	var remote *os.File
 	var eisRemote *os.File
 
 	defer func() {
@@ -182,9 +198,6 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		var cleanupErr error
 		if sessionPath.IsValid() {
 			cleanupErr = errors.Join(cleanupErr, closePortalObject(conn, sessionPath, sessionInterface))
-		}
-		if remote != nil {
-			cleanupErr = errors.Join(cleanupErr, remote.Close())
 		}
 		if eisRemote != nil {
 			cleanupErr = errors.Join(cleanupErr, eisRemote.Close())
@@ -218,6 +231,20 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		conn:    conn,
 		object:  conn.Object(portalDestination, portalPath),
 		signals: signals,
+	}
+	if err := client.object.CallWithContext(
+		ctx,
+		registryInterface+".Register",
+		0,
+		ApplicationID,
+		map[string]dbus.Variant{},
+	).Err; err != nil {
+		return nil, fmt.Errorf("register portal application identity %q: %w", ApplicationID, err)
+	}
+
+	restoreToken, restorePath, tokenAttempted, err := loadRestoreToken(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("load portal restore token: %w", err)
 	}
 
 	sessionToken, err := portalToken()
@@ -289,11 +316,25 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, fmt.Errorf("desktop portal does not advertise requested %s cursor mode", cfg.CursorMode)
 	}
 
-	if _, err := client.request(ctx, screenCastInterface, "SelectSources", sessionPath, map[string]dbus.Variant{
+	sourceOptions := map[string]dbus.Variant{
 		"types":       dbus.MakeVariant(sourceTypeMonitor),
 		"multiple":    dbus.MakeVariant(false),
 		"cursor_mode": dbus.MakeVariant(cursorMode),
-	}, sessionPath); err != nil {
+	}
+	if !cfg.Input.Enabled {
+		sourceOptions["persist_mode"] = dbus.MakeVariant(persistUntilRevoked)
+		if restoreToken != "" {
+			sourceOptions["restore_token"] = dbus.MakeVariant(restoreToken)
+		}
+	}
+	if _, err := client.request(
+		ctx,
+		screenCastInterface,
+		"SelectSources",
+		sessionPath,
+		sourceOptions,
+		sessionPath,
+	); err != nil {
 		return nil, fmt.Errorf("select screen cast source: %w", err)
 	}
 
@@ -340,9 +381,21 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		if missing := requestedDevices &^ availableDeviceTypes; missing != 0 {
 			return nil, fmt.Errorf("desktop portal does not advertise requested input device types 0x%x", missing)
 		}
-		if _, err := client.request(ctx, remoteDesktopInterface, "SelectDevices", sessionPath, map[string]dbus.Variant{
-			"types": dbus.MakeVariant(requestedDevices),
-		}, sessionPath); err != nil {
+		deviceOptions := map[string]dbus.Variant{
+			"types":        dbus.MakeVariant(requestedDevices),
+			"persist_mode": dbus.MakeVariant(persistUntilRevoked),
+		}
+		if restoreToken != "" {
+			deviceOptions["restore_token"] = dbus.MakeVariant(restoreToken)
+		}
+		if _, err := client.request(
+			ctx,
+			remoteDesktopInterface,
+			"SelectDevices",
+			sessionPath,
+			deviceOptions,
+			sessionPath,
+		); err != nil {
 			return nil, fmt.Errorf("select remote desktop devices: %w", err)
 		}
 	}
@@ -358,6 +411,20 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("start screen cast session: %w", err)
+	}
+	tokenRotated := false
+	if restoreTokenVariant, ok := startResults["restore_token"]; ok {
+		var nextRestoreToken string
+		if err := dbus.Store([]any{restoreTokenVariant}, &nextRestoreToken); err != nil {
+			return nil, fmt.Errorf("decode portal restore token: %w", err)
+		}
+		if nextRestoreToken == "" {
+			return nil, errors.New("portal returned an empty restore token")
+		}
+		if err := storeRestoreToken(restorePath, cfg, nextRestoreToken); err != nil {
+			return nil, fmt.Errorf("store portal restore token: %w", err)
+		}
+		tokenRotated = true
 	}
 
 	streamsVariant, ok := startResults["streams"]
@@ -405,25 +472,6 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 	}
 	requestMatchAdded = false
 
-	var remoteFD dbus.UnixFD
-	if err := client.object.CallWithContext(
-		ctx,
-		screenCastInterface+".OpenPipeWireRemote",
-		0,
-		sessionPath,
-		map[string]dbus.Variant{},
-	).Store(&remoteFD); err != nil {
-		return nil, fmt.Errorf("open portal PipeWire remote: %w", err)
-	}
-	if remoteFD < 0 {
-		return nil, fmt.Errorf("portal returned invalid PipeWire file descriptor %d", remoteFD)
-	}
-
-	remote = os.NewFile(uintptr(remoteFD), "xdg-desktop-portal-pipewire")
-	if remote == nil {
-		return nil, fmt.Errorf("open portal PipeWire file descriptor %d", remoteFD)
-	}
-
 	if cfg.Input.Enabled {
 		var eisFD dbus.UnixFD
 		if err := client.object.CallWithContext(
@@ -447,7 +495,6 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 	session := &Session{
 		conn:      conn,
 		path:      sessionPath,
-		remote:    remote,
 		eisRemote: eisRemote,
 		stream: streamMetadata{
 			nodeID:            streams[0].NodeID,
@@ -461,6 +508,12 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 			Pointer:  authorizedDevices&deviceTypePointer != 0,
 			Keyboard: authorizedDevices&deviceTypeKeyboard != 0,
 		},
+		restore: RestoreStatus{
+			ApplicationID:  ApplicationID,
+			StatePath:      restorePath,
+			TokenAttempted: tokenAttempted,
+			TokenRotated:   tokenRotated,
+		},
 		signals:      signals,
 		sessionMatch: sessionMatch,
 		stop:         make(chan struct{}),
@@ -471,7 +524,12 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 	return session, nil
 }
 
-// AcquireStream duplicates the portal PipeWire remote for one media pipeline.
+// RestoreStatus reports whether this launch supplied and rotated a portal token.
+func (s *Session) RestoreStatus() RestoreStatus {
+	return s.restore
+}
+
+// AcquireStream opens an independent portal PipeWire remote for one media pipeline.
 // The caller owns the returned Stream and must close it.
 func (s *Session) AcquireStream() (*Stream, error) {
 	s.stateMu.Lock()
@@ -484,24 +542,35 @@ func (s *Session) AcquireStream() (*Stream, error) {
 		return nil, ErrSessionClosed
 	}
 
-	duplicateFD, err := unix.FcntlInt(s.remote.Fd(), unix.F_DUPFD_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("duplicate portal PipeWire file descriptor: %w", err)
+	ctx, cancel := context.WithTimeout(context.Background(), portalCallTimeout)
+	defer cancel()
+	var remoteFD dbus.UnixFD
+	if err := s.conn.Object(portalDestination, portalPath).CallWithContext(
+		ctx,
+		screenCastInterface+".OpenPipeWireRemote",
+		0,
+		s.path,
+		map[string]dbus.Variant{},
+	).Store(&remoteFD); err != nil {
+		return nil, fmt.Errorf("open portal PipeWire remote: %w", err)
 	}
-	duplicate := os.NewFile(uintptr(duplicateFD), "xdg-desktop-portal-pipewire-pipeline")
-	if duplicate == nil {
-		_ = unix.Close(duplicateFD)
-		return nil, fmt.Errorf("open duplicated portal PipeWire file descriptor %d", duplicateFD)
+	if remoteFD < 0 {
+		return nil, fmt.Errorf("portal returned invalid PipeWire file descriptor %d", remoteFD)
+	}
+	remote := os.NewFile(uintptr(remoteFD), "xdg-desktop-portal-pipewire-pipeline")
+	if remote == nil {
+		_ = unix.Close(int(remoteFD))
+		return nil, fmt.Errorf("open portal PipeWire file descriptor %d", remoteFD)
 	}
 
 	return &Stream{
-		PipeWireFD:        int(duplicate.Fd()),
+		PipeWireFD:        int(remote.Fd()),
 		NodeID:            s.stream.nodeID,
 		PipeWireSerial:    s.stream.pipeWireSerial,
 		HasPipeWireSerial: s.stream.hasPipeWireSerial,
 		MappingID:         s.stream.mappingID,
 		Properties:        s.stream.properties,
-		remote:            duplicate,
+		remote:            remote,
 	}, nil
 }
 
@@ -550,7 +619,7 @@ func (s *Session) Err() error {
 	return s.err
 }
 
-// Close closes the portal session, PipeWire remote, and D-Bus connection.
+// Close closes the portal session, EIS remote, and D-Bus connection.
 func (s *Session) Close() error {
 	s.finish(true, nil)
 	return s.Err()
@@ -587,7 +656,6 @@ func (s *Session) finish(closePortal bool, cause error) {
 		if closePortal {
 			cleanupErr = errors.Join(cleanupErr, closePortalObject(s.conn, s.path, sessionInterface))
 		}
-		cleanupErr = errors.Join(cleanupErr, s.remote.Close())
 		if s.eisRemote != nil {
 			cleanupErr = errors.Join(cleanupErr, s.eisRemote.Close())
 		}
@@ -688,6 +756,130 @@ func portalToken() (string, error) {
 		return "", err
 	}
 	return "webdesktop_" + hex.EncodeToString(random), nil
+}
+
+type restoreState struct {
+	Version       int         `json:"version"`
+	ApplicationID string      `json:"application_id"`
+	Source        string      `json:"source"`
+	ScreenShare   bool        `json:"screen_share"`
+	Input         InputConfig `json:"input"`
+	RestoreToken  string      `json:"restore_token"`
+}
+
+func loadRestoreToken(cfg Config) (string, string, bool, error) {
+	statePath, err := restoreTokenPath()
+	if err != nil {
+		return "", "", false, err
+	}
+
+	file, err := os.Open(statePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", statePath, false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return "", "", false, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", "", false, errors.New("restore token state is not a regular file")
+	}
+	if info.Mode().Perm() != 0o600 {
+		return "", "", false, fmt.Errorf("restore token state permissions are %04o, want 0600", info.Mode().Perm())
+	}
+
+	var state restoreState
+	decoder := json.NewDecoder(file)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return "", "", false, err
+	}
+	var trailing struct{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return "", "", false, errors.New("restore token state contains multiple JSON values")
+		}
+		return "", "", false, err
+	}
+
+	matches := state.Version == restoreStateVersion &&
+		state.ApplicationID == ApplicationID &&
+		state.Source == cfg.Source &&
+		state.ScreenShare &&
+		state.Input == cfg.Input &&
+		state.RestoreToken != ""
+	if !matches {
+		if err := os.Remove(statePath); err != nil {
+			return "", "", false, fmt.Errorf("discard incompatible restore token state: %w", err)
+		}
+		return "", statePath, false, nil
+	}
+	return state.RestoreToken, statePath, true, nil
+}
+
+func storeRestoreToken(statePath string, cfg Config, token string) error {
+	state := restoreState{
+		Version:       restoreStateVersion,
+		ApplicationID: ApplicationID,
+		Source:        cfg.Source,
+		ScreenShare:   true,
+		Input:         cfg.Input,
+		RestoreToken:  token,
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+
+	directory := filepath.Dir(statePath)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return err
+	}
+
+	file, err := os.CreateTemp(directory, ".portal-restore-*")
+	if err != nil {
+		return err
+	}
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, statePath)
+}
+
+func restoreTokenPath() (string, error) {
+	if stateHome := os.Getenv("XDG_STATE_HOME"); stateHome != "" {
+		if !filepath.IsAbs(stateHome) {
+			return "", errors.New("XDG_STATE_HOME must be an absolute path")
+		}
+		return filepath.Join(stateHome, "webdesktop", "portal-restore.json"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state", "webdesktop", "portal-restore.json"), nil
 }
 
 func closePortalObject(conn *dbus.Conn, path dbus.ObjectPath, iface string) error {

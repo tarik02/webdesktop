@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,14 +26,13 @@ const (
 	maxControlMessageBytes   = 16 * 1024
 	maxInputMessageBytes     = 4 * 1024
 	maxQueuedCandidates      = 256
-	peerSampleQueueSize      = 8
 
 	initialOfferTimeout        = 10 * time.Second
 	signalingPingInterval      = 5 * time.Second
 	signalingPongWait          = 15 * time.Second
+	traceSnapshotInterval      = 5 * time.Second
 	websocketCloseTimeout      = time.Second
 	peerConnectionCloseTimeout = 2 * time.Second
-	maxRTPPTSJump              = 10 * time.Second
 )
 
 type peer struct {
@@ -44,15 +44,17 @@ type peer struct {
 
 	videoSender  *pion.RTPSender
 	videoTrack   *sampleTrack
+	videoCodec   string
 	videoSamples chan media.Sample
 	audioSender  *pion.RTPSender
 	audioTrack   *sampleTrack
 	audioSamples chan media.AudioSample
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	closeOnce sync.Once
-	connected atomic.Bool
+	ctx                context.Context
+	cancel             context.CancelFunc
+	closeOnce          sync.Once
+	connected          atomic.Bool
+	videoNeedsKeyframe atomic.Bool
 
 	signalWriteMu  sync.Mutex
 	controlWriteMu sync.Mutex
@@ -71,6 +73,38 @@ type peer struct {
 	input                    *pion.DataChannel
 	inputSequence            uint64
 	inputSequenceSet         bool
+
+	videoSamplesSeen     atomic.Uint64
+	videoSamplesEnqueued atomic.Uint64
+	videoSamplesDropped  atomic.Uint64
+	videoSamplesWritten  atomic.Uint64
+	videoBytesWritten    atomic.Uint64
+	videoNACKReports     atomic.Uint64
+	videoNACKPackets     atomic.Uint64
+	audioSamplesSeen     atomic.Uint64
+	audioSamplesEnqueued atomic.Uint64
+	audioSamplesDropped  atomic.Uint64
+	audioSamplesWritten  atomic.Uint64
+	keyframeRequests     atomic.Uint64
+	inputMessagesSeen    atomic.Uint64
+	inputMessagesSent    atomic.Uint64
+	inputOverloads       atomic.Uint64
+	videoReportSeen      atomic.Bool
+	videoFractionLost    atomic.Uint32
+	videoTotalLost       atomic.Uint32
+	videoJitter          atomic.Uint32
+	videoPTSRegressions  atomic.Uint64
+	videoProducedElapsed atomic.Int64
+	videoRTPElapsed      atomic.Int64
+	videoProductionGap   atomic.Int64
+	videoSampleDuration  atomic.Int64
+	videoTimingDrift     atomic.Int64
+	videoSampleAge       atomic.Int64
+	videoMaxSampleAge    atomic.Int64
+	videoWriteDuration   atomic.Int64
+	videoMaxWrite        atomic.Int64
+	videoRTPTicks        atomic.Uint64
+	videoLastRTPTicks    atomic.Uint64
 }
 
 func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
@@ -79,36 +113,46 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		return nil, err
 	}
 
-	peerConnection, err := s.newPeerConnection()
+	s.qualityMu.Lock()
+	quality := s.source.Quality()
+	videoCodec := videoCodecCapability(quality.Codec)
+	peerConnection, err := s.newPeerConnection(
+		quality.Codec,
+		videoCodec,
+	)
 	if err != nil {
+		s.qualityMu.Unlock()
 		s.releaseReservation()
 		return nil, err
 	}
 
 	ctx, cancel := context.WithCancel(s.ctx)
 	videoTrack := newSampleTrack(
-		s.videoCodec,
+		videoCodec,
 		pion.RTPCodecTypeVideo,
 		fmt.Sprintf("video-%d", id),
 		"desktop",
 	)
+	peerLogger := s.logger.With(zap.Uint64("peer_id", id))
 	peer := &peer{
 		id:           id,
 		service:      s,
-		logger:       s.logger.With(zap.Uint64("peer_id", id)),
+		logger:       peerLogger,
 		conn:         connection,
 		pc:           peerConnection,
 		videoTrack:   videoTrack,
-		videoSamples: make(chan media.Sample, peerSampleQueueSize),
+		videoCodec:   quality.Codec,
+		videoSamples: make(chan media.Sample),
 		ctx:          ctx,
 		cancel:       cancel,
 	}
 	if err := s.registerPeer(peer); err != nil {
+		s.qualityMu.Unlock()
 		cancel()
 		_ = peerConnection.Close()
 		return nil, err
 	}
-
+	s.qualityMu.Unlock()
 	videoSender, err := peerConnection.AddTrack(videoTrack)
 	if err != nil {
 		peer.Close()
@@ -122,7 +166,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 			fmt.Sprintf("audio-%d", id),
 			"desktop",
 		)
-		peer.audioSamples = make(chan media.AudioSample, 16)
+		peer.audioSamples = make(chan media.AudioSample)
 		audioSender, err := peerConnection.AddTrack(peer.audioTrack)
 		if err != nil {
 			peer.Close()
@@ -136,8 +180,10 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		peer.logger.Info("peer connection state changed", zap.String("state", state.String()))
 		switch state {
 		case pion.PeerConnectionStateConnected:
+			peer.videoNeedsKeyframe.Store(true)
 			peer.connected.Store(true)
 			peer.connectedKeyframeRequest.Do(func() {
+				peer.keyframeRequests.Add(1)
 				s.requestKeyframe("peer-connected")
 			})
 		case pion.PeerConnectionStateFailed, pion.PeerConnectionStateClosed:
@@ -145,10 +191,21 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		}
 	})
 	peerConnection.OnICEConnectionStateChange(func(state pion.ICEConnectionState) {
+		if s.cfg.TracingEnabled {
+			peer.logger.Debug("ICE connection state changed", zap.String("state", state.String()))
+		}
 		if state == pion.ICEConnectionStateFailed || state == pion.ICEConnectionStateClosed {
 			go peer.closeWith(websocket.CloseGoingAway, "ICE connection closed")
 		}
 	})
+	if s.cfg.TracingEnabled {
+		peerConnection.OnICEGatheringStateChange(func(state pion.ICEGatheringState) {
+			peer.logger.Debug("ICE gathering state changed", zap.String("state", state.String()))
+		})
+		peerConnection.OnSignalingStateChange(func(state pion.SignalingState) {
+			peer.logger.Debug("signaling state changed", zap.String("state", state.String()))
+		})
+	}
 	peerConnection.OnDataChannel(peer.onDataChannel)
 
 	go peer.readRTCP(peer.videoSender, true)
@@ -156,6 +213,9 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 	if peer.audioSender != nil {
 		go peer.readRTCP(peer.audioSender, false)
 		go peer.writeAudioSamples()
+	}
+	if s.cfg.TracingEnabled {
+		go peer.traceLoop()
 	}
 	peer.logger.Info("WebRTC peer created", zap.Int("active_peers", s.PeerCount()))
 	return peer, nil
@@ -250,7 +310,10 @@ func (p *peer) run(requestContext context.Context) {
 
 		switch request.Type.Value {
 		case signalTypeOffer:
-			if !request.SDP.Set || request.SDP.Value == "" || request.Candidate.Set {
+			if !request.SDP.Set ||
+				request.SDP.Value == "" ||
+				request.Candidate.Set ||
+				hasClientLogFields(request) {
 				if !p.writeSignalError("invalid_offer", "offer requires sdp and no candidate") {
 					p.Close()
 					return
@@ -263,7 +326,7 @@ func (p *peer) run(requestContext context.Context) {
 				return
 			}
 		case signalTypeICECandidate:
-			if request.SDP.Set || !request.Candidate.Set {
+			if request.SDP.Set || !request.Candidate.Set || hasClientLogFields(request) {
 				if !p.writeSignalError("invalid_candidate", "ice-candidate requires candidate and no sdp") {
 					p.Close()
 					return
@@ -275,6 +338,22 @@ func (p *peer) run(requestContext context.Context) {
 				p.Close()
 				return
 			}
+		case signalTypeClientLog:
+			if !p.service.cfg.TracingEnabled {
+				if !p.writeSignalError("tracing_disabled", "client tracing is disabled") {
+					p.Close()
+					return
+				}
+				continue
+			}
+			if protocolErr := validateClientLogRequest(request); protocolErr != nil {
+				if !p.writeSignalError(protocolErr.Code, protocolErr.Message) {
+					p.Close()
+					return
+				}
+				continue
+			}
+			p.logClientTrace(request)
 		default:
 			if !p.writeSignalError(
 				"unexpected_message",
@@ -297,7 +376,7 @@ func (p *peer) handleOffer(sdp string) error {
 			return err
 		}
 	}
-	if p.service.cfg.Codec == media.CodecH264 {
+	if p.videoCodec == media.CodecH264 {
 		if err := validateH264Offer(sdp); err != nil {
 			return err
 		}
@@ -334,7 +413,7 @@ func (p *peer) handleOffer(sdp string) error {
 		return errors.New("local answer is unavailable")
 	}
 	answerSDP := localDescription.SDP
-	if p.service.cfg.Codec == media.CodecH264 {
+	if p.videoCodec == media.CodecH264 {
 		answerSDP, err = rewriteH264Answer(answerSDP)
 		if err != nil {
 			return fmt.Errorf("set H.264 answer parameters: %w", err)
@@ -460,6 +539,117 @@ func (p *peer) pingLoop() {
 	}
 }
 
+func (p *peer) logClientTrace(request signalRequest) {
+	keys := make([]string, 0, len(request.Details.Value))
+	for key := range request.Details.Value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	details := make([]zap.Field, 0, len(keys))
+	for _, key := range keys {
+		details = append(details, zap.String(key, request.Details.Value[key]))
+	}
+	fields := []zap.Field{
+		zap.String("client_event", request.Event.Value),
+		zap.String("client_level", request.Level.Value),
+		zap.Dict("client_details", details...),
+	}
+	logger := p.logger.Named("client")
+	switch request.Level.Value {
+	case "debug":
+		logger.Debug("frontend trace", fields...)
+	case "info":
+		logger.Info("frontend trace", fields...)
+	case "warn":
+		logger.Warn("frontend trace", fields...)
+	case "error":
+		logger.Error("frontend trace", fields...)
+	}
+}
+
+func (p *peer) traceLoop() {
+	p.logTraceSnapshot()
+	ticker := time.NewTicker(traceSnapshotInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-ticker.C:
+			p.logTraceSnapshot()
+		}
+	}
+}
+
+func (p *peer) logTraceSnapshot() {
+	p.controlMu.Lock()
+	controlState := "absent"
+	if p.control != nil {
+		controlState = p.control.ReadyState().String()
+	}
+	p.controlMu.Unlock()
+	p.inputMu.Lock()
+	inputState := "absent"
+	if p.input != nil {
+		inputState = p.input.ReadyState().String()
+	}
+	p.inputMu.Unlock()
+
+	fields := []zap.Field{
+		zap.String("codec", p.videoCodec),
+		zap.Bool("connected", p.connected.Load()),
+		zap.Bool("video_needs_keyframe", p.videoNeedsKeyframe.Load()),
+		zap.String("peer_connection_state", p.pc.ConnectionState().String()),
+		zap.String("ice_connection_state", p.pc.ICEConnectionState().String()),
+		zap.String("ice_gathering_state", p.pc.ICEGatheringState().String()),
+		zap.String("signaling_state", p.pc.SignalingState().String()),
+		zap.String("control_channel_state", controlState),
+		zap.String("input_channel_state", inputState),
+		zap.Int("video_queue_length", len(p.videoSamples)),
+		zap.Uint64("video_samples_seen", p.videoSamplesSeen.Load()),
+		zap.Uint64("video_samples_enqueued", p.videoSamplesEnqueued.Load()),
+		zap.Uint64("video_samples_dropped", p.videoSamplesDropped.Load()),
+		zap.Uint64("video_samples_written", p.videoSamplesWritten.Load()),
+		zap.Uint64("video_bytes_written", p.videoBytesWritten.Load()),
+		zap.Uint64("video_nack_reports", p.videoNACKReports.Load()),
+		zap.Uint64("video_nack_packets", p.videoNACKPackets.Load()),
+		zap.Int("video_bitrate_kbps", p.service.source.Quality().BitrateKbps),
+		zap.Uint64("video_source_pts_regressions", p.videoPTSRegressions.Load()),
+		zap.Duration("video_produced_elapsed", time.Duration(p.videoProducedElapsed.Load())),
+		zap.Duration("video_rtp_elapsed", time.Duration(p.videoRTPElapsed.Load())),
+		zap.Duration("video_production_gap", time.Duration(p.videoProductionGap.Load())),
+		zap.Duration("video_sample_duration", time.Duration(p.videoSampleDuration.Load())),
+		zap.Duration("video_timing_drift", time.Duration(p.videoTimingDrift.Load())),
+		zap.Duration("video_sample_age", time.Duration(p.videoSampleAge.Load())),
+		zap.Duration("video_max_sample_age", time.Duration(p.videoMaxSampleAge.Load())),
+		zap.Duration("video_write_duration", time.Duration(p.videoWriteDuration.Load())),
+		zap.Duration("video_max_write_duration", time.Duration(p.videoMaxWrite.Load())),
+		zap.Uint64("video_rtp_ticks", p.videoRTPTicks.Load()),
+		zap.Uint64("video_last_rtp_ticks", p.videoLastRTPTicks.Load()),
+		zap.Uint64("keyframe_requests", p.keyframeRequests.Load()),
+		zap.Uint64("input_messages_seen", p.inputMessagesSeen.Load()),
+		zap.Uint64("input_messages_sent", p.inputMessagesSent.Load()),
+		zap.Uint64("input_overloads", p.inputOverloads.Load()),
+	}
+	if p.audioSamples != nil {
+		fields = append(fields,
+			zap.Int("audio_queue_length", len(p.audioSamples)),
+			zap.Uint64("audio_samples_seen", p.audioSamplesSeen.Load()),
+			zap.Uint64("audio_samples_enqueued", p.audioSamplesEnqueued.Load()),
+			zap.Uint64("audio_samples_dropped", p.audioSamplesDropped.Load()),
+			zap.Uint64("audio_samples_written", p.audioSamplesWritten.Load()),
+		)
+	}
+	if p.videoReportSeen.Load() {
+		fields = append(fields,
+			zap.Uint32("video_rtcp_fraction_lost", p.videoFractionLost.Load()),
+			zap.Uint32("video_rtcp_total_lost", p.videoTotalLost.Load()),
+			zap.Uint32("video_rtcp_jitter_clock_units", p.videoJitter.Load()),
+		)
+	}
+	p.logger.Debug("peer trace snapshot", fields...)
+}
+
 func (p *peer) readRTCP(sender *pion.RTPSender, video bool) {
 	for {
 		packets, _, err := sender.ReadRTCP()
@@ -478,11 +668,28 @@ func (p *peer) readRTCP(sender *pion.RTPSender, video bool) {
 			continue
 		}
 		for _, packet := range packets {
-			switch packet.(type) {
+			switch typed := packet.(type) {
 			case *rtcp.PictureLossIndication:
+				p.keyframeRequests.Add(1)
 				p.service.requestKeyframe("pli")
 			case *rtcp.FullIntraRequest:
+				p.keyframeRequests.Add(1)
 				p.service.requestKeyframe("fir")
+			case *rtcp.TransportLayerNack:
+				p.videoNACKReports.Add(1)
+				var packets uint64
+				for index := range typed.Nacks {
+					packets += uint64(len(typed.Nacks[index].PacketList()))
+				}
+				p.videoNACKPackets.Add(packets)
+			case *rtcp.ReceiverReport:
+				if len(typed.Reports) > 0 {
+					report := typed.Reports[0]
+					p.videoFractionLost.Store(uint32(report.FractionLost))
+					p.videoTotalLost.Store(report.TotalLost)
+					p.videoJitter.Store(report.Jitter)
+					p.videoReportSeen.Store(true)
+				}
 			}
 		}
 	}
@@ -647,6 +854,9 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		Framerate:   current.Framerate,
 		BitrateKbps: current.BitrateKbps,
 	}
+	if request.Quality.Value.Codec.Set {
+		quality.Codec = request.Quality.Value.Codec.Value
+	}
 	if request.Quality.Value.Width.Set {
 		quality.Width = request.Quality.Value.Width.Value
 	}
@@ -660,7 +870,7 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		quality.BitrateKbps = request.Quality.Value.BitrateKbps.Value
 	}
 	if quality.Codec == media.CodecH264 {
-		if err := media.ValidateH264Level4(quality); err != nil {
+		if err := media.ValidateH264Level42(quality); err != nil {
 			p.service.qualityMu.Unlock()
 			p.writeControlError(channel, request.ID.Value, "h264_level_incompatible", err.Error())
 			return
@@ -668,24 +878,40 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	}
 	err = p.service.source.UpdateQuality(quality)
 	effective := p.service.source.Quality()
+	codecChanged := err == nil && effective.Codec != current.Codec
+	var qualityGeneration uint64
+	var incompatiblePeers []*peer
+	if codecChanged {
+		p.service.qualityGeneration++
+		qualityGeneration = p.service.qualityGeneration
+		for _, peer := range p.service.peerSnapshot() {
+			if peer != p && peer.videoCodec != effective.Codec {
+				incompatiblePeers = append(incompatiblePeers, peer)
+			}
+		}
+	}
 	p.service.qualityMu.Unlock()
 	if err != nil {
 		p.writeControlError(channel, request.ID.Value, "quality_update_failed", err.Error())
 		return
 	}
-
-	if !p.writeControl(channel, controlResponse{
+	responseWritten := p.writeControl(channel, controlResponse{
 		Version: controlVersion,
 		ID:      request.ID.Value,
 		Type:    controlTypeQualitySetResult,
 		OK:      true,
 		Quality: qualityResponse(effective),
-	}) {
+	})
+	for _, peer := range incompatiblePeers {
+		go p.service.closePeerForCodecChange(peer, qualityGeneration)
+	}
+	if !responseWritten {
 		go p.Close()
 	}
 }
 
 func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataChannelMessage) {
+	p.inputMessagesSeen.Add(1)
 	if !message.IsString {
 		p.writeInputError(channel, nil, "invalid_message", "input messages must be text")
 		return
@@ -731,28 +957,31 @@ func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataCh
 	}
 	if err := p.service.input.Submit(p.id, event); err != nil {
 		if errors.Is(err, remoteinput.ErrOverloaded) {
+			p.inputOverloads.Add(1)
 			return
 		}
 		p.writeInputError(channel, sequence, inputErrorCode(err), err.Error())
+		return
 	}
+	p.inputMessagesSent.Add(1)
 }
 
 func (p *peer) enqueueVideo(sample media.Sample) {
 	if !p.connected.Load() || p.ctx.Err() != nil {
 		return
 	}
-	select {
-	case p.videoSamples <- sample:
+	p.videoSamplesSeen.Add(1)
+	if p.videoNeedsKeyframe.Load() && !sample.KeyFrame {
+		p.videoSamplesDropped.Add(1)
 		return
-	default:
-	}
-	select {
-	case <-p.videoSamples:
-	default:
 	}
 	select {
 	case p.videoSamples <- sample:
-	default:
+		p.videoSamplesEnqueued.Add(1)
+		if sample.KeyFrame {
+			p.videoNeedsKeyframe.Store(false)
+		}
+	case <-p.ctx.Done():
 	}
 }
 
@@ -760,89 +989,93 @@ func (p *peer) enqueueAudio(sample media.AudioSample) {
 	if !p.connected.Load() || p.ctx.Err() != nil {
 		return
 	}
+	p.audioSamplesSeen.Add(1)
 	select {
 	case p.audioSamples <- sample:
-		return
-	default:
-	}
-	select {
-	case <-p.audioSamples:
-	default:
-	}
-	select {
-	case p.audioSamples <- sample:
-	default:
+		p.audioSamplesEnqueued.Add(1)
+	case <-p.ctx.Done():
 	}
 }
 
 func (p *peer) writeVideoSamples() {
-	var pending media.Sample
-	havePending := false
+	var origin time.Time
+	var previousProducedAt time.Time
+	var previousPTS time.Duration
+	var rtpTicksTotal uint64
+	havePreviousPTS := false
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
 		case sample := <-p.videoSamples:
-			if !havePending {
-				pending = sample
-				havePending = true
-				continue
+			if origin.IsZero() {
+				origin = sample.ProducedAt
 			}
-
-			duration := pending.Duration
-			if delta := sample.PTS - pending.PTS; delta > 0 && delta <= maxRTPPTSJump {
-				duration = delta
-			} else if delta <= 0 || delta > maxRTPPTSJump {
-				p.logger.Debug("RTP PTS discontinuity",
-					zap.Duration("previous_pts", pending.PTS),
-					zap.Duration("current_pts", sample.PTS),
-					zap.Duration("sample_duration", pending.Duration),
-				)
+			producedElapsed := sample.ProducedAt.Sub(origin)
+			var productionGap time.Duration
+			if !previousProducedAt.IsZero() {
+				productionGap = sample.ProducedAt.Sub(previousProducedAt)
 			}
-			if err := p.videoTrack.WriteSample(pending.Data, duration); err != nil {
+			if havePreviousPTS && sample.PTS <= previousPTS {
+				p.videoPTSRegressions.Add(1)
+			}
+			sampleAge := time.Since(sample.ProducedAt)
+			p.videoSampleAge.Store(int64(sampleAge))
+			for previousMax := p.videoMaxSampleAge.Load(); int64(sampleAge) > previousMax; previousMax = p.videoMaxSampleAge.Load() {
+				if p.videoMaxSampleAge.CompareAndSwap(previousMax, int64(sampleAge)) {
+					break
+				}
+			}
+			writeStarted := time.Now()
+			rtpTicks, err := p.videoTrack.WriteSampleAt(sample.Data, productionGap)
+			if err != nil {
 				if p.ctx.Err() == nil {
 					p.logger.Debug("peer video writer stopped", zap.Error(err))
 					go p.closeWith(websocket.CloseGoingAway, "video transport stopped")
 				}
 				return
 			}
-			pending = sample
+			writeDuration := time.Since(writeStarted)
+			p.videoWriteDuration.Store(int64(writeDuration))
+			for previousMax := p.videoMaxWrite.Load(); int64(writeDuration) > previousMax; previousMax = p.videoMaxWrite.Load() {
+				if p.videoMaxWrite.CompareAndSwap(previousMax, int64(writeDuration)) {
+					break
+				}
+			}
+			p.videoSamplesWritten.Add(1)
+			p.videoBytesWritten.Add(uint64(len(sample.Data)))
+			rtpTicksTotal += rtpTicks
+			clockRate := uint64(p.videoTrack.capability.ClockRate)
+			rtpElapsed := time.Duration(rtpTicksTotal/clockRate)*time.Second +
+				time.Duration((rtpTicksTotal%clockRate)*uint64(time.Second)/clockRate)
+			p.videoProducedElapsed.Store(int64(producedElapsed))
+			p.videoRTPElapsed.Store(int64(rtpElapsed))
+			p.videoProductionGap.Store(int64(productionGap))
+			p.videoSampleDuration.Store(int64(sample.Duration))
+			p.videoTimingDrift.Store(int64(rtpElapsed - producedElapsed))
+			p.videoRTPTicks.Store(rtpTicksTotal)
+			p.videoLastRTPTicks.Store(rtpTicks)
+			previousProducedAt = sample.ProducedAt
+			previousPTS = sample.PTS
+			havePreviousPTS = true
 		}
 	}
 }
 
 func (p *peer) writeAudioSamples() {
-	var pending media.AudioSample
-	havePending := false
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
 		case sample := <-p.audioSamples:
-			if !havePending {
-				pending = sample
-				havePending = true
-				continue
-			}
-
-			duration := pending.Duration
-			if delta := sample.PTS - pending.PTS; delta > 0 && delta <= maxRTPPTSJump {
-				duration = delta
-			} else if delta <= 0 || delta > maxRTPPTSJump {
-				p.logger.Debug("audio RTP PTS discontinuity",
-					zap.Duration("previous_pts", pending.PTS),
-					zap.Duration("current_pts", sample.PTS),
-					zap.Duration("sample_duration", pending.Duration),
-				)
-			}
-			if err := p.audioTrack.WriteSample(pending.Data, duration); err != nil {
+			if _, err := p.audioTrack.WriteSample(sample.Data, sample.Duration); err != nil {
 				if p.ctx.Err() == nil {
 					p.logger.Debug("peer audio writer stopped", zap.Error(err))
 					go p.closeWith(websocket.CloseGoingAway, "audio transport stopped")
 				}
 				return
 			}
-			pending = sample
+			p.audioSamplesWritten.Add(1)
 		}
 	}
 }
@@ -954,6 +1187,12 @@ func (p *peer) Close() {
 
 func (p *peer) closeWith(code int, reason string) {
 	p.closeOnce.Do(func() {
+		if p.service.cfg.TracingEnabled {
+			p.logger.Debug("peer closing",
+				zap.Int("websocket_close_code", code),
+				zap.String("reason", reason),
+			)
+		}
 		p.connected.Store(false)
 		_ = p.service.input.Release(p.id)
 		p.cancel()

@@ -6,6 +6,9 @@ logging:
   level: info
   format: json
 
+tracing:
+  enabled: false
+
 video:
   source: monitor
   cursor_mode: embedded
@@ -15,10 +18,9 @@ video:
   framerate: 30
   bitrate_kbps: 4000
   tuning:
-    threads: 4
+    threads: 8
     keyframe_interval: 60
-    vp8_cpu_used: 8
-    h264_speed_preset: veryfast
+    vp8_cpu_used: 16
 
 audio:
   enabled: false

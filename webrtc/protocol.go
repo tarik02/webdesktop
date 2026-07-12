@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"strings"
+	"unicode"
 
 	pion "github.com/pion/webrtc/v4"
 	"github.com/tarik02/webdesktop/input"
@@ -23,6 +24,7 @@ const (
 	signalTypeOffer        = "offer"
 	signalTypeAnswer       = "answer"
 	signalTypeICECandidate = "ice-candidate"
+	signalTypeClientLog    = "client-log"
 	signalTypeError        = "error"
 
 	controlTypeQualitySet         = "video.quality.set"
@@ -39,6 +41,11 @@ const (
 	inputTypePointerScroll   = "input.pointer.scroll"
 	inputTypeKeyboardKey     = "input.keyboard.key"
 	inputTypeError           = "error"
+
+	maxClientLogEventBytes       = 128
+	maxClientLogDetails          = 32
+	maxClientLogDetailKeyBytes   = 64
+	maxClientLogDetailValueBytes = 512
 )
 
 type protocolError struct {
@@ -149,11 +156,38 @@ func (value *optionalCandidate) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type optionalStringMap struct {
+	Value map[string]string
+	Set   bool
+}
+
+func (value *optionalStringMap) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(data, []byte("null")) {
+		return errors.New("null is not allowed")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&value.Value); err != nil {
+		return err
+	}
+	var trailing struct{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	value.Set = true
+	return nil
+}
+
 type signalRequest struct {
 	Version   optionalInt       `json:"version"`
 	Type      optionalString    `json:"type"`
 	SDP       optionalString    `json:"sdp"`
 	Candidate optionalCandidate `json:"candidate"`
+	Level     optionalString    `json:"level"`
+	Event     optionalString    `json:"event"`
+	Details   optionalStringMap `json:"details"`
 }
 
 type signalResponse struct {
@@ -313,6 +347,67 @@ func qualityResponse(quality media.Quality) *controlQuality {
 	}
 }
 
+func validateClientLogRequest(request signalRequest) *protocolError {
+	if request.SDP.Set || request.Candidate.Set {
+		return &protocolError{
+			Code:    "unexpected_field",
+			Message: "client-log does not allow sdp or candidate",
+		}
+	}
+	if !request.Level.Set {
+		return &protocolError{Code: "missing_field", Message: "level is required"}
+	}
+	if !request.Event.Set {
+		return &protocolError{Code: "missing_field", Message: "event is required"}
+	}
+	if !request.Details.Set {
+		return &protocolError{Code: "missing_field", Message: "details is required"}
+	}
+	switch request.Level.Value {
+	case "debug", "info", "warn", "error":
+	default:
+		return &protocolError{
+			Code:    "invalid_client_log",
+			Message: "level must be debug, info, warn, or error",
+		}
+	}
+	if request.Event.Value == "" ||
+		len(request.Event.Value) > maxClientLogEventBytes ||
+		strings.IndexFunc(request.Event.Value, unicode.IsControl) >= 0 {
+		return &protocolError{
+			Code:    "invalid_client_log",
+			Message: "event must contain between 1 and 128 bytes without control characters",
+		}
+	}
+	if len(request.Details.Value) > maxClientLogDetails {
+		return &protocolError{
+			Code:    "invalid_client_log",
+			Message: "details must contain at most 32 entries",
+		}
+	}
+	for key, value := range request.Details.Value {
+		if key == "" ||
+			len(key) > maxClientLogDetailKeyBytes ||
+			strings.IndexFunc(key, unicode.IsControl) >= 0 {
+			return &protocolError{
+				Code:    "invalid_client_log",
+				Message: "detail keys must contain between 1 and 64 bytes without control characters",
+			}
+		}
+		if len(value) > maxClientLogDetailValueBytes {
+			return &protocolError{
+				Code:    "invalid_client_log",
+				Message: "detail values must contain at most 512 bytes",
+			}
+		}
+	}
+	return nil
+}
+
+func hasClientLogFields(request signalRequest) bool {
+	return request.Level.Set || request.Event.Set || request.Details.Set
+}
+
 func validateControlRequest(request controlRequest) *protocolError {
 	if !request.Version.Set {
 		return &protocolError{
@@ -367,12 +462,17 @@ func validateControlRequest(request controlRequest) *protocolError {
 		}
 	}
 	if request.Quality.Value.Codec.Set {
-		return &protocolError{
-			Code:    "codec_static",
-			Message: "codec cannot change on an active WebRTC stream",
+		switch request.Quality.Value.Codec.Value {
+		case media.CodecVP8, media.CodecH264:
+		default:
+			return &protocolError{
+				Code:    "invalid_quality",
+				Message: "quality codec must be vp8 or h264",
+			}
 		}
 	}
-	if !request.Quality.Value.Width.Set &&
+	if !request.Quality.Value.Codec.Set &&
+		!request.Quality.Value.Width.Set &&
 		!request.Quality.Value.Height.Set &&
 		!request.Quality.Value.Framerate.Set &&
 		!request.Quality.Value.BitrateKbps.Set {
@@ -665,12 +765,12 @@ func validateH264Offer(raw string) error {
 			}
 			if profileLevelID[0] == 0x42 &&
 				profileLevelID[1] == 0xe0 &&
-				(profileLevelID[2] >= 0x28 || parameters["level-asymmetry-allowed"] == "1") {
+				(profileLevelID[2] >= 0x2a || parameters["level-asymmetry-allowed"] == "1") {
 				return nil
 			}
 		}
 	}
-	return errors.New("offer does not support browser-compatible H.264 constrained-baseline with packetization mode 1 and Level 4.0 or level asymmetry")
+	return errors.New("offer does not support browser-compatible H.264 constrained-baseline with packetization mode 1 and Level 4.2 or level asymmetry")
 }
 
 func rewriteH264Answer(raw string) (string, error) {

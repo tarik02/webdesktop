@@ -235,6 +235,42 @@ func (c *Controller) Submit(owner uint64, event Event) error {
 		generation: c.generation,
 		event:      event,
 	}
+	if len(c.queue) > 0 {
+		last := &c.queue[len(c.queue)-1]
+		if last.owner == queued.owner && last.generation == queued.generation {
+			switch {
+			case last.event.Type == EventPointerAbsolute && event.Type == EventPointerAbsolute:
+				last.event = event
+				c.mu.Unlock()
+				return nil
+			case last.event.Type == EventPointerRelative && event.Type == EventPointerRelative:
+				dx := last.event.DX + event.DX
+				dy := last.event.DY + event.DY
+				if !math.IsInf(dx, 0) && !math.IsInf(dy, 0) {
+					last.event.Sequence = event.Sequence
+					last.event.DX = dx
+					last.event.DY = dy
+					c.mu.Unlock()
+					return nil
+				}
+			case last.event.Type == EventPointerScroll &&
+				event.Type == EventPointerScroll &&
+				!last.event.StopHorizontal &&
+				!last.event.StopVertical &&
+				!event.StopHorizontal &&
+				!event.StopVertical:
+				horizontal := last.event.Horizontal + event.Horizontal
+				vertical := last.event.Vertical + event.Vertical
+				if !math.IsInf(horizontal, 0) && !math.IsInf(vertical, 0) {
+					last.event.Sequence = event.Sequence
+					last.event.Horizontal = horizontal
+					last.event.Vertical = vertical
+					c.mu.Unlock()
+					return nil
+				}
+			}
+		}
+	}
 	if len(c.queue) < c.cfg.QueueSize {
 		c.queue = append(c.queue, queued)
 		select {
@@ -243,40 +279,6 @@ func (c *Controller) Submit(owner uint64, event Event) error {
 		}
 		c.mu.Unlock()
 		return nil
-	}
-	last := &c.queue[len(c.queue)-1]
-	if last.owner == queued.owner && last.generation == queued.generation {
-		switch {
-		case last.event.Type == EventPointerAbsolute && event.Type == EventPointerAbsolute:
-			last.event = event
-			c.mu.Unlock()
-			return nil
-		case last.event.Type == EventPointerRelative && event.Type == EventPointerRelative:
-			dx := last.event.DX + event.DX
-			dy := last.event.DY + event.DY
-			if !math.IsInf(dx, 0) && !math.IsInf(dy, 0) {
-				last.event.Sequence = event.Sequence
-				last.event.DX = dx
-				last.event.DY = dy
-				c.mu.Unlock()
-				return nil
-			}
-		case last.event.Type == EventPointerScroll &&
-			event.Type == EventPointerScroll &&
-			!last.event.StopHorizontal &&
-			!last.event.StopVertical &&
-			!event.StopHorizontal &&
-			!event.StopVertical:
-			horizontal := last.event.Horizontal + event.Horizontal
-			vertical := last.event.Vertical + event.Vertical
-			if !math.IsInf(horizontal, 0) && !math.IsInf(vertical, 0) {
-				last.event.Sequence = event.Sequence
-				last.event.Horizontal = horizontal
-				last.event.Vertical = vertical
-				c.mu.Unlock()
-				return nil
-			}
-		}
 	}
 	revoke := c.revokeLocked(ErrOverloaded)
 	c.mu.Unlock()

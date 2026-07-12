@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Webdesktop
+GenericName=Remote Desktop Service
+Comment=Stream the active Plasma desktop over WebRTC
+Exec=@webdesktop@/bin/webdesktop serve
+TryExec=@webdesktop@/bin/webdesktop
+Icon=video-display
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+Categories=Network;RemoteAccess;

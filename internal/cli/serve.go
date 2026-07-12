@@ -46,17 +46,17 @@ func newServeCommand() *cobra.Command {
 	flags.String("shutdown-timeout", defaults.Server.ShutdownTimeout, "graceful shutdown timeout with unit")
 	flags.String("log-level", defaults.Logging.Level, "log level")
 	flags.String("log-format", defaults.Logging.Format, "log format (json or console)")
+	flags.Bool("tracing-enabled", defaults.Tracing.Enabled, "enable bounded WebRTC and browser diagnostics")
 	flags.String("video-source", defaults.Video.Source, "portal video source (monitor)")
 	flags.String("video-cursor-mode", defaults.Video.CursorMode, "captured cursor mode (hidden or embedded)")
-	flags.String("video-codec", defaults.Video.Codec, "software video codec (vp8 or h264)")
+	flags.String("video-codec", defaults.Video.Codec, "video codec (vp8 or h264)")
 	flags.Int("video-width", defaults.Video.Width, "encoded video width")
 	flags.Int("video-height", defaults.Video.Height, "encoded video height")
 	flags.Int("video-framerate", defaults.Video.Framerate, "encoded video frames per second")
 	flags.Int("video-bitrate-kbps", defaults.Video.BitrateKbps, "encoded video bitrate in Kbit/s")
-	flags.Int("video-encoder-threads", defaults.Video.Tuning.Threads, "software encoder thread count")
+	flags.Int("video-encoder-threads", defaults.Video.Tuning.Threads, "VP8 encoder thread count")
 	flags.Int("video-keyframe-interval", defaults.Video.Tuning.KeyframeInterval, "maximum frames between keyframes")
 	flags.Int("video-vp8-cpu-used", defaults.Video.Tuning.VP8CPUUsed, "VP8 speed setting from 0 to 16")
-	flags.String("video-h264-speed-preset", defaults.Video.Tuning.H264SpeedPreset, "x264 software speed preset")
 	flags.Bool("audio-enabled", defaults.Audio.Enabled, "capture desktop audio from a PulseAudio monitor")
 	flags.String("audio-device", defaults.Audio.Device, "PulseAudio monitor source")
 	flags.Int("audio-bitrate-kbps", defaults.Audio.BitrateKbps, "Opus audio bitrate in Kbit/s")
@@ -88,6 +88,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("server.shutdown_timeout", defaults.Server.ShutdownTimeout)
 	v.SetDefault("logging.level", defaults.Logging.Level)
 	v.SetDefault("logging.format", defaults.Logging.Format)
+	v.SetDefault("tracing.enabled", defaults.Tracing.Enabled)
 	v.SetDefault("video.source", defaults.Video.Source)
 	v.SetDefault("video.cursor_mode", defaults.Video.CursorMode)
 	v.SetDefault("video.codec", defaults.Video.Codec)
@@ -98,7 +99,6 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("video.tuning.threads", defaults.Video.Tuning.Threads)
 	v.SetDefault("video.tuning.keyframe_interval", defaults.Video.Tuning.KeyframeInterval)
 	v.SetDefault("video.tuning.vp8_cpu_used", defaults.Video.Tuning.VP8CPUUsed)
-	v.SetDefault("video.tuning.h264_speed_preset", defaults.Video.Tuning.H264SpeedPreset)
 	v.SetDefault("audio.enabled", defaults.Audio.Enabled)
 	v.SetDefault("audio.device", defaults.Audio.Device)
 	v.SetDefault("audio.bitrate_kbps", defaults.Audio.BitrateKbps)
@@ -120,6 +120,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"server.shutdown_timeout",
 		"logging.level",
 		"logging.format",
+		"tracing.enabled",
 		"video.source",
 		"video.cursor_mode",
 		"video.codec",
@@ -130,7 +131,6 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video.tuning.threads",
 		"video.tuning.keyframe_interval",
 		"video.tuning.vp8_cpu_used",
-		"video.tuning.h264_speed_preset",
 		"audio.enabled",
 		"audio.device",
 		"audio.bitrate_kbps",
@@ -157,6 +157,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"shutdown-timeout":        "server.shutdown_timeout",
 		"log-level":               "logging.level",
 		"log-format":              "logging.format",
+		"tracing-enabled":         "tracing.enabled",
 		"video-source":            "video.source",
 		"video-cursor-mode":       "video.cursor_mode",
 		"video-codec":             "video.codec",
@@ -167,7 +168,6 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video-encoder-threads":   "video.tuning.threads",
 		"video-keyframe-interval": "video.tuning.keyframe_interval",
 		"video-vp8-cpu-used":      "video.tuning.vp8_cpu_used",
-		"video-h264-speed-preset": "video.tuning.h264_speed_preset",
 		"audio-enabled":           "audio.enabled",
 		"audio-device":            "audio.device",
 		"audio-bitrate-kbps":      "audio.bitrate_kbps",

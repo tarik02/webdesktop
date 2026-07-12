@@ -1,7 +1,8 @@
 [Unit]
 Description=Webdesktop remote desktop service
 Requisite=graphical-session.target
-After=graphical-session.target
+Wants=xdg-desktop-portal.service plasma-xdg-desktop-portal-kde.service
+After=graphical-session.target xdg-desktop-portal.service plasma-xdg-desktop-portal-kde.service
 PartOf=graphical-session.target
 
 [Service]

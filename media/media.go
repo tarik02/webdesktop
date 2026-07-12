@@ -17,30 +17,30 @@ const (
 	CodecVP8  = "vp8"
 	CodecH264 = "h264"
 
-	H264SDPProfileLevelID          = "42e028"
-	H264EncoderProfileLevelID      = "42c028"
-	H264Level                      = "4"
-	H264MaxMacroblocksPerDimension = 256
-	H264MaxMacroblocksPerFrame     = 8192
-	H264MaxMacroblocksPerSecond    = 245760
-	H264MaxLevelBitrateKbps        = 20000
+	MinBitrateKbps                 = 100
+	VP8MaxBitrateKbps              = 2147483
+	H264SDPProfileLevelID          = "42e02a"
+	H264Level                      = "4.2"
+	H264MaxMacroblocksPerDimension = 263
+	H264MaxMacroblocksPerFrame     = 8704
+	H264MaxMacroblocksPerSecond    = 522240
+	H264MaxLevelBitrateKbps        = 50000
 )
 
 // Quality contains runtime-adjustable video settings.
 type Quality struct {
-	Codec       string
-	Width       int
-	Height      int
-	Framerate   int
-	BitrateKbps int
+	Codec       string `json:"codec"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	Framerate   int    `json:"framerate"`
+	BitrateKbps int    `json:"bitrate_kbps"`
 }
 
-// Tuning contains static software encoder settings.
+// Tuning contains static encoder settings.
 type Tuning struct {
 	Threads          int
 	KeyframeInterval int
 	VP8CPUUsed       int
-	H264SpeedPreset  string
 }
 
 // Config contains capture, quality, and encoder settings.
@@ -52,11 +52,12 @@ type Config struct {
 
 // Sample is one encoded video frame ready for transport.
 type Sample struct {
-	Data     []byte
-	Codec    string
-	PTS      time.Duration
-	Duration time.Duration
-	KeyFrame bool
+	Data       []byte
+	Codec      string
+	ProducedAt time.Time
+	PTS        time.Duration
+	Duration   time.Duration
+	KeyFrame   bool
 }
 
 // Validate checks the implemented media behavior.
@@ -78,12 +79,6 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Tuning.VP8CPUUsed < 0 || cfg.Tuning.VP8CPUUsed > 16 {
 		errs = append(errs, errors.New("video tuning VP8 CPU used must be between 0 and 16"))
-	}
-
-	switch cfg.Tuning.H264SpeedPreset {
-	case "ultrafast", "superfast", "veryfast", "faster", "fast", "medium":
-	default:
-		errs = append(errs, errors.New("video tuning H.264 speed preset must be ultrafast, superfast, veryfast, faster, fast, or medium"))
 	}
 
 	return errors.Join(errs...)
@@ -108,25 +103,36 @@ func (quality Quality) Validate() error {
 	if quality.Framerate < 1 || quality.Framerate > 120 {
 		errs = append(errs, errors.New("video framerate must be between 1 and 120"))
 	}
-	if quality.BitrateKbps < 100 || quality.BitrateKbps > 100000 {
-		errs = append(errs, errors.New("video bitrate must be between 100 and 100000 Kbit/s"))
+	if quality.BitrateKbps < MinBitrateKbps {
+		errs = append(errs, fmt.Errorf(
+			"video bitrate must be at least %d Kbit/s",
+			MinBitrateKbps,
+		))
 	}
-	if quality.Codec == CodecH264 {
-		errs = append(errs, ValidateH264Level4(quality))
+	switch quality.Codec {
+	case CodecVP8:
+		if quality.BitrateKbps > VP8MaxBitrateKbps {
+			errs = append(errs, fmt.Errorf(
+				"VP8 bitrate must not exceed %d Kbit/s",
+				VP8MaxBitrateKbps,
+			))
+		}
+	case CodecH264:
+		errs = append(errs, ValidateH264Level42(quality))
 	}
 
 	return errors.Join(errs...)
 }
 
-// ValidateH264Level4 checks constrained-baseline Level 4.0 limits.
-func ValidateH264Level4(quality Quality) error {
+// ValidateH264Level42 checks constrained-baseline Level 4.2 limits.
+func ValidateH264Level42(quality Quality) error {
 	widthMacroblocks := (quality.Width + 15) / 16
 	heightMacroblocks := (quality.Height + 15) / 16
 	macroblocks := widthMacroblocks * heightMacroblocks
 	var errs []error
 	if widthMacroblocks > H264MaxMacroblocksPerDimension {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.0 width must not exceed %d macroblocks; width %d requires %d",
+			"H.264 Level 4.2 width must not exceed %d macroblocks; width %d requires %d",
 			H264MaxMacroblocksPerDimension,
 			quality.Width,
 			widthMacroblocks,
@@ -134,7 +140,7 @@ func ValidateH264Level4(quality Quality) error {
 	}
 	if heightMacroblocks > H264MaxMacroblocksPerDimension {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.0 height must not exceed %d macroblocks; height %d requires %d",
+			"H.264 Level 4.2 height must not exceed %d macroblocks; height %d requires %d",
 			H264MaxMacroblocksPerDimension,
 			quality.Height,
 			heightMacroblocks,
@@ -142,7 +148,7 @@ func ValidateH264Level4(quality Quality) error {
 	}
 	if macroblocks > H264MaxMacroblocksPerFrame {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.0 supports at most %d macroblocks per frame; %dx%d requires %d",
+			"H.264 Level 4.2 supports at most %d macroblocks per frame; %dx%d requires %d",
 			H264MaxMacroblocksPerFrame,
 			quality.Width,
 			quality.Height,
@@ -151,7 +157,7 @@ func ValidateH264Level4(quality Quality) error {
 	}
 	if macroblocks*quality.Framerate > H264MaxMacroblocksPerSecond {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.0 supports at most %d macroblocks per second; %dx%d at %d fps requires %d",
+			"H.264 Level 4.2 supports at most %d macroblocks per second; %dx%d at %d fps requires %d",
 			H264MaxMacroblocksPerSecond,
 			quality.Width,
 			quality.Height,
@@ -161,7 +167,7 @@ func ValidateH264Level4(quality Quality) error {
 	}
 	if quality.BitrateKbps > H264MaxLevelBitrateKbps {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.0 bitrate must not exceed %d Kbit/s",
+			"H.264 Level 4.2 bitrate must not exceed %d Kbit/s",
 			H264MaxLevelBitrateKbps,
 		))
 	}
@@ -170,21 +176,23 @@ func ValidateH264Level4(quality Quality) error {
 
 var gstInitOnce sync.Once
 
+const videoPipelineReadyTimeout = 5 * time.Second
+
 // Service owns portal capture and the active encoder pipeline.
 type Service struct {
 	cfg    Config
 	logger *zap.Logger
 
-	mu              sync.Mutex
-	started         bool
-	running         bool
-	session         *capture.Session
-	pipeline        *videoPipeline
-	pipelineErr     error
-	quality         Quality
-	pipelineChanged chan struct{}
-	samples         chan Sample
-	closeSamples    sync.Once
+	mu           sync.Mutex
+	started      bool
+	running      bool
+	session      *capture.Session
+	pipeline     *persistentVideoPipeline
+	quality      Quality
+	samples      chan Sample
+	stopSamples  chan struct{}
+	closeSamples sync.Once
+	updateMu     sync.Mutex
 }
 
 // New constructs the media service without requesting portal authorization.
@@ -198,11 +206,11 @@ func New(cfg Config, logger *zap.Logger) (*Service, error) {
 	})
 
 	return &Service{
-		cfg:             cfg,
-		logger:          logger,
-		quality:         cfg.Quality,
-		pipelineChanged: make(chan struct{}, 1),
-		samples:         make(chan Sample, 8),
+		cfg:         cfg,
+		logger:      logger,
+		quality:     cfg.Quality,
+		samples:     make(chan Sample),
+		stopSamples: make(chan struct{}),
 	}, nil
 }
 
@@ -227,7 +235,7 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 	if err != nil {
 		return fmt.Errorf("acquire desktop capture stream: %w", err)
 	}
-	pipeline, err := newVideoPipeline(
+	pipeline, err := newPersistentVideoPipeline(
 		stream,
 		s.cfg.Quality,
 		s.cfg.Tuning,
@@ -235,6 +243,9 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 		s.logger.Named("gstreamer"),
 	)
 	if err != nil {
+		return fmt.Errorf("build video pipeline: %w", err)
+	}
+	if err := pipeline.Start(); err != nil {
 		return fmt.Errorf("start video pipeline: %w", err)
 	}
 
@@ -254,6 +265,8 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 	)
 
 	defer func() {
+		close(s.stopSamples)
+
 		s.mu.Lock()
 		current := s.pipeline
 		s.pipeline = nil
@@ -270,12 +283,8 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 	for {
 		s.mu.Lock()
 		current := s.pipeline
-		pipelineErr := s.pipelineErr
 		s.mu.Unlock()
 
-		if pipelineErr != nil {
-			return pipelineErr
-		}
 		if current == nil {
 			return errors.New("video pipeline is not running")
 		}
@@ -291,20 +300,15 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 		case <-current.Done():
 			s.mu.Lock()
 			active := s.pipeline
-			pipelineErr := s.pipelineErr
 			s.mu.Unlock()
 
 			if active != current {
 				continue
 			}
-			if pipelineErr != nil {
-				return pipelineErr
-			}
 			if err := current.Err(); err != nil {
 				return err
 			}
 			return errors.New("video pipeline stopped")
-		case <-s.pipelineChanged:
 		}
 	}
 }
@@ -321,84 +325,65 @@ func (s *Service) Quality() Quality {
 	return s.quality
 }
 
-// UpdateQuality applies bitrate live when supported and rebuilds for other changes.
+// UpdateQuality applies bitrate-only changes live. All other quality changes
+// replace only the encoder branch.
 func (s *Service) UpdateQuality(quality Quality) error {
 	if err := quality.Validate(); err != nil {
 		return err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
 
+	s.mu.Lock()
 	if !s.running || s.pipeline == nil || s.session == nil {
+		s.mu.Unlock()
 		return errors.New("media service is not running")
 	}
-	if s.pipelineErr != nil {
-		return s.pipelineErr
-	}
-	if quality == s.quality {
+	pipeline := s.pipeline
+	current := s.quality
+	s.mu.Unlock()
+
+	if quality == current {
 		return nil
 	}
 
-	if quality.Codec == s.quality.Codec &&
-		quality.Width == s.quality.Width &&
-		quality.Height == s.quality.Height &&
-		quality.Framerate == s.quality.Framerate {
-		if err := s.pipeline.SetBitrate(quality.BitrateKbps); err != nil {
-			return fmt.Errorf("update live encoder bitrate: %w", err)
+	started := time.Now()
+	bitrateOnly := quality.Codec == current.Codec &&
+		quality.Width == current.Width &&
+		quality.Height == current.Height &&
+		quality.Framerate == current.Framerate
+	if !bitrateOnly {
+		if err := pipeline.ReplaceQuality(quality, s.cfg.Tuning, videoPipelineReadyTimeout); err != nil {
+			return fmt.Errorf("replace video encoder branch: %w", err)
 		}
-		s.quality = quality
+	} else if err := pipeline.SetBitrate(quality.BitrateKbps); err != nil {
+		return fmt.Errorf("update live encoder bitrate: %w", err)
+	}
+
+	s.mu.Lock()
+	if !s.running || s.pipeline != pipeline || s.session == nil {
+		s.mu.Unlock()
+		return errors.New("media service stopped during video quality update")
+	}
+	s.quality = quality
+	s.mu.Unlock()
+
+	if bitrateOnly {
 		s.logger.Info("video bitrate updated",
 			zap.String("codec", quality.Codec),
 			zap.Int("bitrate_kbps", quality.BitrateKbps),
+			zap.Duration("duration", time.Since(started)),
 		)
 		return nil
 	}
-
-	if err := s.pipeline.Close(); err != nil {
-		return fmt.Errorf("stop video pipeline for quality update: %w", err)
-	}
-
-	stream, err := s.session.AcquireStream()
-	if err != nil {
-		s.pipeline = nil
-		s.pipelineErr = fmt.Errorf("acquire desktop capture stream for quality update: %w", err)
-		select {
-		case s.pipelineChanged <- struct{}{}:
-		default:
-		}
-		return s.pipelineErr
-	}
-	replacement, err := newVideoPipeline(
-		stream,
-		quality,
-		s.cfg.Tuning,
-		s.emitSample,
-		s.logger.Named("gstreamer"),
-	)
-	if err != nil {
-		s.pipeline = nil
-		s.pipelineErr = fmt.Errorf("rebuild video pipeline: %w", err)
-		select {
-		case s.pipelineChanged <- struct{}{}:
-		default:
-		}
-		return s.pipelineErr
-	}
-
-	s.pipeline = replacement
-	s.quality = quality
-	select {
-	case s.pipelineChanged <- struct{}{}:
-	default:
-	}
-
-	s.logger.Info("video pipeline rebuilt",
+	s.logger.Info("video quality updated",
 		zap.String("codec", quality.Codec),
 		zap.Int("width", quality.Width),
 		zap.Int("height", quality.Height),
 		zap.Int("framerate", quality.Framerate),
 		zap.Int("bitrate_kbps", quality.BitrateKbps),
+		zap.Duration("duration", time.Since(started)),
 	)
 	return nil
 }
@@ -411,18 +396,19 @@ func (s *Service) RequestKeyframe() error {
 	if !s.running || s.pipeline == nil {
 		return errors.New("media service is not running")
 	}
-	if s.pipelineErr != nil {
-		return s.pipelineErr
-	}
 	if err := s.pipeline.RequestKeyframe(); err != nil {
 		return fmt.Errorf("request encoder keyframe: %w", err)
 	}
 	return nil
 }
 
-func (s *Service) emitSample(sample Sample) {
+func (s *Service) emitSample(stop <-chan struct{}, sample Sample) bool {
 	select {
 	case s.samples <- sample:
-	default:
+		return true
+	case <-stop:
+		return false
+	case <-s.stopSamples:
+		return false
 	}
 }
