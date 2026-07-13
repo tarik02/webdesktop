@@ -43,14 +43,15 @@ type clipboardMessage struct {
 }
 
 type clipboardChannelState struct {
-	channel         *pion.DataChannel
-	ctx             context.Context
-	bufferedLow     chan struct{}
-	closed          chan struct{}
-	cancel          context.CancelFunc
-	closeOnce       sync.Once
-	receive         *clipboardReceive
-	receiveReserved bool
+	channel            *pion.DataChannel
+	ctx                context.Context
+	bufferedLow        chan struct{}
+	closed             chan struct{}
+	cancel             context.CancelFunc
+	closeOnce          sync.Once
+	receive            *clipboardReceive
+	receiveReserved    bool
+	transferGeneration uint64
 }
 
 type clipboardReceive struct {
@@ -64,6 +65,10 @@ type clipboardReceive struct {
 }
 
 func (p *peer) setClipboardChannel(channel *pion.DataChannel) {
+	if p.isClosing() {
+		_ = channel.Close()
+		return
+	}
 	if !channel.Ordered() || channel.MaxPacketLifeTime() != nil || channel.MaxRetransmits() != nil {
 		p.logger.Info("rejecting clipboard data channel without reliable ordered delivery")
 		_ = channel.Close()
@@ -125,7 +130,7 @@ func (p *peer) setClipboardChannel(channel *pion.DataChannel) {
 		}
 		p.logger.Info("clipboard data channel opened")
 		updates, unsubscribe := p.service.clipboard.Subscribe()
-		go func() {
+		if !p.goOwned(func() {
 			defer unsubscribe()
 			for {
 				select {
@@ -144,7 +149,9 @@ func (p *peer) setClipboardChannel(channel *pion.DataChannel) {
 					}
 				}
 			}
-		}()
+		}) {
+			unsubscribe()
+		}
 	})
 	channel.OnClose(func() { p.logger.Info("clipboard data channel closed"); cleanup() })
 	channel.OnError(func(err error) { p.logger.Debug("clipboard data channel error", zap.Error(err)); cleanup() })
@@ -167,10 +174,18 @@ func (p *peer) clipboardCurrent(state *clipboardChannelState) bool {
 }
 
 func (p *peer) handleClipboardMessage(channel *pion.DataChannel, message pion.DataChannelMessage, state *clipboardChannelState) {
-	if !p.clipboardCurrent(state) {
+	if p.isClosing() || !p.clipboardCurrent(state) {
 		return
 	}
 	if !message.IsString && len(message.Data) > clipboardChunkBytes {
+		p.clipboardMu.Lock()
+		if state.receive != nil {
+			state.receive.timer.Stop()
+			state.receive = nil
+		}
+		state.receiveReserved = false
+		state.transferGeneration++
+		p.clipboardMu.Unlock()
 		p.writeClipboardError(channel, "", "invalid_transfer", "clipboard data chunk exceeds maximum size")
 		return
 	}
@@ -207,6 +222,8 @@ func (p *peer) handleClipboardMessage(channel *pion.DataChannel, message pion.Da
 			return
 		}
 		state.receiveReserved = true
+		state.transferGeneration++
+		transferGeneration := state.transferGeneration
 		p.clipboardMu.Unlock()
 
 		receive := &clipboardReceive{
@@ -223,8 +240,10 @@ func (p *peer) handleClipboardMessage(channel *pion.DataChannel, message pion.Da
 		}
 
 		p.clipboardMu.Lock()
-		if p.clipboardState != state || state.ctx.Err() != nil {
-			state.receiveReserved = false
+		if p.clipboardState != state || state.ctx.Err() != nil || state.transferGeneration != transferGeneration {
+			if state.transferGeneration == transferGeneration {
+				state.receiveReserved = false
+			}
 			p.clipboardMu.Unlock()
 			return
 		}
