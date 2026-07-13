@@ -132,13 +132,16 @@ type Service struct {
 	runMu   sync.Mutex
 	started bool
 
-	peersMu sync.Mutex
-	closed  bool
-	nextID  uint64
-	count   int
-	peers   map[*peer]struct{}
+	peersMu         sync.Mutex
+	closed          bool
+	closeDone       chan struct{}
+	closeDoneClosed bool
+	nextID          uint64
+	reservations    int
+	peers           map[*peer]struct{}
 
 	qualityMu         sync.Mutex
+	qualityChangeMu   sync.Mutex
 	qualityGeneration uint64
 	keyframeRequests  chan string
 }
@@ -203,6 +206,7 @@ func New(
 		ctx:              ctx,
 		cancel:           cancel,
 		peers:            make(map[*peer]struct{}),
+		closeDone:        make(chan struct{}),
 		keyframeRequests: make(chan string, 1),
 	}, nil
 }
@@ -322,10 +326,16 @@ func (s *Service) Run(ctx context.Context) error {
 func (s *Service) Close() {
 	s.peersMu.Lock()
 	if s.closed {
+		closeDone := s.closeDone
 		s.peersMu.Unlock()
+		<-closeDone
 		return
 	}
 	s.closed = true
+	if s.reservations == 0 && !s.closeDoneClosed {
+		close(s.closeDone)
+		s.closeDoneClosed = true
+	}
 	s.cancel()
 	s.source.SetActive(false)
 	peers := make([]*peer, 0, len(s.peers))
@@ -334,31 +344,24 @@ func (s *Service) Close() {
 	}
 	s.peersMu.Unlock()
 
-	var wait sync.WaitGroup
-	wait.Add(len(peers))
 	for _, peer := range peers {
-		go func() {
-			defer wait.Done()
-			peer.closeWith(websocket.CloseGoingAway, "service stopping")
-		}()
+		peer.closeWith(websocket.CloseGoingAway, "service stopping")
 	}
-	closed := make(chan struct{})
-	go func() {
-		wait.Wait()
-		close(closed)
-	}()
+	deadline := time.NewTimer(servicePeerCloseTimeout)
+	defer deadline.Stop()
 	select {
-	case <-closed:
-	case <-time.After(servicePeerCloseTimeout):
+	case <-s.closeDone:
+	case <-deadline.C:
 		s.logger.Warn("timed out closing WebRTC peers", zap.Int("peer_count", len(peers)))
 	}
+
 }
 
 // PeerCount returns the number of active and initializing peers.
 func (s *Service) PeerCount() int {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
-	return s.count
+	return s.reservations
 }
 
 func videoCodecCapability(codec string) pion.RTPCodecCapability {
@@ -445,11 +448,11 @@ func (s *Service) reservePeer() (uint64, error) {
 	if s.closed {
 		return 0, errServiceUnavailable
 	}
-	if s.count >= s.cfg.MaxPeers {
+	if s.reservations >= s.cfg.MaxPeers {
 		return 0, errPeerLimit
 	}
 	s.nextID++
-	s.count++
+	s.reservations++
 	return s.nextID, nil
 }
 
@@ -458,7 +461,6 @@ func (s *Service) registerPeer(peer *peer) error {
 	defer s.peersMu.Unlock()
 
 	if s.closed {
-		s.count--
 		return errServiceUnavailable
 	}
 	first := len(s.peers) == 0
@@ -471,7 +473,11 @@ func (s *Service) registerPeer(peer *peer) error {
 
 func (s *Service) releaseReservation() {
 	s.peersMu.Lock()
-	s.count--
+	s.reservations--
+	if s.closed && s.reservations == 0 && !s.closeDoneClosed {
+		close(s.closeDone)
+		s.closeDoneClosed = true
+	}
 	s.peersMu.Unlock()
 }
 
@@ -479,7 +485,6 @@ func (s *Service) removePeer(peer *peer) {
 	s.peersMu.Lock()
 	if _, ok := s.peers[peer]; ok {
 		delete(s.peers, peer)
-		s.count--
 		if len(s.peers) == 0 {
 			s.source.SetActive(false)
 		}
@@ -492,18 +497,20 @@ func (s *Service) peerSnapshot() []*peer {
 	defer s.peersMu.Unlock()
 	peers := make([]*peer, 0, len(s.peers))
 	for peer := range s.peers {
-		peers = append(peers, peer)
+		if !peer.isClosing() {
+			peers = append(peers, peer)
+		}
 	}
 	return peers
 }
 
 func (s *Service) closePeerForCodecChange(peer *peer, generation uint64) {
 	s.qualityMu.Lock()
-	defer s.qualityMu.Unlock()
-	if s.qualityGeneration != generation {
-		return
+	current := s.qualityGeneration == generation
+	s.qualityMu.Unlock()
+	if current {
+		peer.closeWith(websocket.CloseServiceRestart, "video codec changed")
 	}
-	peer.closeWith(websocket.CloseServiceRestart, "video codec changed")
 }
 
 func (s *Service) requestKeyframe(reason string) {
