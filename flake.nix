@@ -131,19 +131,28 @@
                 --set GST_PLUGIN_SYSTEM_PATH_1_0 "${gstPluginPath}" \
                 --run 'export GST_REGISTRY_1_0="''${XDG_RUNTIME_DIR:-/tmp}/webdesktop-gstreamer-${pkgs.gst_all_1.gstreamer.version}-''${UID}.bin"'
 
-              mkdir -p $out/lib/systemd/user $out/share/applications $out/share/webdesktop
+              mkdir -p \
+                $out/lib/systemd/user \
+                $out/share/applications \
+                $out/share/licenses/webdesktop \
+                $out/share/webdesktop
               substitute ${./packaging/systemd/webdesktop.service} \
                 $out/lib/systemd/user/webdesktop.service \
                 --replace-fail '@webdesktop@' "$out"
               substitute ${./packaging/applications/io.github.tarik02.webdesktop.desktop} \
                 $out/share/applications/io.github.tarik02.webdesktop.desktop \
                 --replace-fail '@webdesktop@' "$out"
+              install -m 0644 ${./LICENSE} \
+                $out/share/licenses/webdesktop/LICENSE
+              install -m 0644 ${./THIRD_PARTY_NOTICES.md} \
+                $out/share/licenses/webdesktop/THIRD_PARTY_NOTICES.md
               install -m 0644 ${./webdesktop.example.yaml} \
                 $out/share/webdesktop/config.example.yaml
             '';
 
             meta = with pkgs.lib; {
               description = "KDE Plasma Wayland desktop streaming service";
+              license = licenses.mit;
               mainProgram = "webdesktop";
               platforms = platforms.linux;
             };

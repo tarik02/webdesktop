@@ -720,6 +720,23 @@ handler on its own router after its authentication and authorization
 middleware. The standalone binary mounts it at the configured signaling path
 and keeps `GET /healthz`.
 
+## Implementation references
+
+The capture and WebRTC pipeline was informed by:
+
+- [Sunshine's PipeWire capture path](https://github.com/LizardByte/Sunshine/blob/c78b9827867b5aff80e7319d222b81e1d2cfd122/src/platform/linux/pipewire.cpp),
+  especially its newest-buffer handling.
+- [Neko's GStreamer capture pipelines](https://github.com/m1k1o/neko/blob/d74052bb844c43a0cc3c2386d083f7505dc483a2/server/internal/config/capture_pipeline.go)
+  and [direct encoded-sample handoff](https://github.com/m1k1o/neko/blob/d74052bb844c43a0cc3c2386d083f7505dc483a2/server/internal/webrtc/track.go).
+- [Selkies' GStreamer WebRTC implementation](https://github.com/selkies-project/selkies/blob/7a80d7eea94f7ff5e754407a18364f4008d8b0fd/src/selkies_gstreamer/gstwebrtc_app.py),
+  especially its VA H.264 settings and live bitrate changes.
+- [KDE KRDP/KPipeWire's VideoStream](https://github.com/KDE/krdp/blob/7396f77f44e3e4515a1d6182ef4ad4f267f8e986/src/VideoStream.cpp)
+  for native Wayland PipeWire capture.
+
+Webdesktop implements these ideas in Go for its xdg-desktop-portal, PipeWire,
+GStreamer, and Pion pipeline. It does not vendor source from these projects.
+Each reference remains under its upstream license.
+
 ## Build and run
 
 Build the package:
@@ -776,6 +793,8 @@ cleanup after SIGTERM.
 The package also installs:
 
 - `$package/share/applications/io.github.tarik02.webdesktop.desktop`
+- `$package/share/licenses/webdesktop/LICENSE`
+- `$package/share/licenses/webdesktop/THIRD_PARTY_NOTICES.md`
 - `$package/share/webdesktop/config.example.yaml`
 
 Webdesktop creates its private user state directory when the portal returns the
@@ -851,3 +870,10 @@ without a ten-second freeze, and each connection must render its first frame
 within five seconds. The script removes the temporary Firefox profile,
 Aperture browser, and test files, then restarts the production service from
 its configured VP8 settings.
+
+## License
+
+Webdesktop's original code is available under the [MIT License](LICENSE).
+The web UI contains files generated from and adapted from shadcn/ui. Its MIT
+notice is preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Dependencies and the implementation references above keep their own licenses.
