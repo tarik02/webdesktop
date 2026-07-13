@@ -108,6 +108,8 @@ type videoEncoderBranch struct {
 	generation uint64
 	namePrefix string
 	quality    Quality
+	profile    EncoderProfile
+	tuning     Tuning
 	pipeline   *gst.Pipeline
 	source     *gstapp.Source
 	rate       *gst.Element
@@ -142,6 +144,7 @@ type videoEncoderBranch struct {
 func newVideoEncoderBranch(
 	generation uint64,
 	quality Quality,
+	profile EncoderProfile,
 	tuning Tuning,
 	emit func(<-chan struct{}, Sample) bool,
 	logger *zap.Logger,
@@ -154,76 +157,9 @@ func newVideoEncoderBranch(
 		fmt.Sprintf("max-rate=%d", quality.Framerate),
 		"skip-to-first=true",
 	}
-	rawPath := strings.Join([]string{
-		"videoconvert",
-		"!",
-		"videoscale",
-		"method=nearest-neighbour",
-		"!",
-		fmt.Sprintf(
-			"video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1",
-			quality.Width,
-			quality.Height,
-			quality.Framerate,
-		),
-	}, " ")
-	encoderPath := strings.Join([]string{
-		"vp8enc",
-		"name=" + namePrefix + "-encoder",
-		fmt.Sprintf("target-bitrate=%d", quality.BitrateKbps*1000),
-		fmt.Sprintf("cpu-used=%d", tuning.VP8CPUUsed),
-		fmt.Sprintf("threads=%d", tuning.Threads),
-		"deadline=1",
-		"buffer-initial-size=6144",
-		"buffer-optimal-size=9216",
-		"buffer-size=12288",
-		"undershoot=95",
-		"min-quantizer=4",
-		"max-quantizer=20",
-		"error-resilient=default",
-		fmt.Sprintf("keyframe-max-dist=%d", tuning.KeyframeInterval),
-		"end-usage=cbr",
-	}, " ")
-	encodedPath := "video/x-vp8"
-	if quality.Codec == CodecH264 {
-		// vah264enc clamps smaller requests to its HRD-compliant minimum.
-		cpbSizeKbits := (quality.BitrateKbps*3 + quality.Framerate - 1) / quality.Framerate
-		rawPath = strings.Join([]string{
-			"vapostproc",
-			"name=" + namePrefix + "-postproc",
-			"qos=true",
-			"scale-method=fast",
-			"!",
-			fmt.Sprintf(
-				"video/x-raw(memory:VAMemory),format=NV12,width=%d,height=%d,framerate=%d/1",
-				quality.Width,
-				quality.Height,
-				quality.Framerate,
-			),
-		}, " ")
-		encoderPath = strings.Join([]string{
-			"vah264enc",
-			"name=" + namePrefix + "-encoder",
-			fmt.Sprintf("bitrate=%d", quality.BitrateKbps),
-			fmt.Sprintf("cpb-size=%d", cpbSizeKbits),
-			fmt.Sprintf("key-int-max=%d", tuning.KeyframeInterval),
-			"b-frames=0",
-			"cabac=false",
-			"dct8x8=false",
-			"mbbrc=disabled",
-			"num-slices=4",
-			"ref-frames=1",
-			"target-usage=6",
-			"rate-control=cbr",
-			"cc-insert=false",
-		}, " ")
-		encodedPath = strings.Join([]string{
-			"h264parse",
-			"name=" + namePrefix + "-parser",
-			"config-interval=-1",
-			"!",
-			"video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)" + H264Level,
-		}, " ")
+	profilePath, err := profile.RenderPipeline(quality.Profile, namePrefix, quality, tuning)
+	if err != nil {
+		return nil, err
 	}
 
 	description := strings.Join([]string{
@@ -242,11 +178,7 @@ func newVideoEncoderBranch(
 		"!",
 		strings.Join(ratePath, " "),
 		"!",
-		rawPath,
-		"!",
-		encoderPath,
-		"!",
-		encodedPath,
+		profilePath,
 		"!",
 		"appsink",
 		"name=" + namePrefix + "-appsink",
@@ -258,7 +190,7 @@ func newVideoEncoderBranch(
 	}, " ")
 	pipeline, err := gst.NewPipelineFromString(description)
 	if err != nil {
-		return nil, fmt.Errorf("create %s encoder pipeline: %w", quality.Codec, err)
+		return nil, fmt.Errorf("create %s encoder pipeline: %w", quality.Profile, err)
 	}
 
 	var sourceElement *gst.Element
@@ -293,7 +225,7 @@ func newVideoEncoderBranch(
 	if err != nil {
 		return nil, fmt.Errorf("get encoder branch videorate: %w", err)
 	}
-	encoder, err = pipeline.GetElementByName(namePrefix + "-encoder")
+	encoder, err = pipeline.GetElementByName(namePrefix + "-" + profile.EncoderElement)
 	if err != nil {
 		return nil, fmt.Errorf("get encoder branch encoder: %w", err)
 	}
@@ -332,6 +264,8 @@ func newVideoEncoderBranch(
 		generation:  generation,
 		namePrefix:  namePrefix,
 		quality:     quality,
+		profile:     profile,
+		tuning:      tuning,
 		pipeline:    pipeline,
 		source:      source,
 		rate:        rate,
@@ -505,7 +439,7 @@ func (b *videoEncoderBranch) handleSample(sink *gstapp.Sink) gst.FlowReturn {
 	producedAt := time.Now()
 	if !b.emit(b.stop, Sample{
 		Data:       data,
-		Codec:      b.quality.Codec,
+		Codec:      b.profile.Codec.ID,
 		ProducedAt: producedAt,
 		PTS:        pts,
 		PTSValid:   ptsValid,
@@ -571,24 +505,25 @@ func (b *videoEncoderBranch) Stop() {
 }
 
 func (b *videoEncoderBranch) SetBitrate(bitrateKbps int) error {
-	switch b.quality.Codec {
-	case CodecVP8:
-		if err := b.encoder.SetProperty("target-bitrate", bitrateKbps*1000); err != nil {
-			return fmt.Errorf("set VP8 target bitrate: %w", err)
-		}
-	case CodecH264:
-		// vah264enc clamps smaller requests to its HRD-compliant minimum.
-		cpbSizeKbits := (bitrateKbps*3 + b.quality.Framerate - 1) / b.quality.Framerate
-		if err := b.encoder.SetProperty("cpb-size", uint(cpbSizeKbits)); err != nil {
-			return fmt.Errorf("set H.264 CPB size: %w", err)
-		}
-		if err := b.encoder.SetProperty("bitrate", uint(bitrateKbps)); err != nil {
-			return fmt.Errorf("set H.264 bitrate: %w", err)
-		}
-	default:
-		return fmt.Errorf("unsupported live bitrate update for codec %q", b.quality.Codec)
+	next := b.quality
+	next.BitrateKbps = bitrateKbps
+	values, err := b.profile.RenderBitrate(next.Profile, b.namePrefix, next, b.tuning)
+	if err != nil {
+		return err
 	}
-	b.quality.BitrateKbps = bitrateKbps
+	for index, property := range b.profile.Bitrate {
+		element, err := b.pipeline.GetElementByName(b.namePrefix + "-" + property.Element)
+		if err != nil {
+			return fmt.Errorf("get live bitrate element %q: %w", property.Element, err)
+		}
+		setErr := element.SetProperty(property.Property, values[index])
+		runtime.SetFinalizer(element.GObject(), nil)
+		element.Unref()
+		if setErr != nil {
+			return fmt.Errorf("set %s.%s live bitrate property: %w", property.Element, property.Property, setErr)
+		}
+	}
+	b.quality = next
 	b.trace.bitrateKbps.Store(int64(bitrateKbps))
 	return nil
 }
@@ -613,7 +548,8 @@ func (b *videoEncoderBranch) appendTraceFields(
 	}
 	fields = append(fields,
 		zap.Uint64(fieldName("branch_generation"), b.generation),
-		zap.String(fieldName("codec"), b.quality.Codec),
+		zap.String(fieldName("profile"), b.quality.Profile),
+		zap.String(fieldName("codec"), b.profile.Codec.ID),
 		zap.Int64(fieldName("bitrate_kbps"), b.trace.bitrateKbps.Load()),
 		zap.Uint64(fieldName("appsrc_push_failures"), b.trace.appSrcPushFailure.Load()),
 		zap.Duration(fieldName("appsink_emit_duration"), time.Duration(b.trace.emitDuration.Load())),
@@ -629,15 +565,19 @@ func (b *videoEncoderBranch) appendTraceFields(
 			fields = append(fields, zap.Any(fieldName("videorate_"+property), value))
 		}
 	}
-	if b.quality.Codec == CodecH264 {
-		for _, property := range []string{"bitrate", "cpb-size"} {
-			if value, err := b.encoder.GetProperty(property); err == nil {
-				fields = append(fields, zap.Any(
-					fieldName("encoder_"+strings.ReplaceAll(property, "-", "_")),
-					value,
-				))
-			}
+	for _, property := range b.profile.Bitrate {
+		element, err := b.pipeline.GetElementByName(b.namePrefix + "-" + property.Element)
+		if err != nil {
+			continue
 		}
+		if value, err := element.GetProperty(property.Property); err == nil {
+			fields = append(fields, zap.Any(
+				fieldName("encoder_"+strings.ReplaceAll(property.Property, "-", "_")),
+				value,
+			))
+		}
+		runtime.SetFinalizer(element.GObject(), nil)
+		element.Unref()
 	}
 	fields = appendVideoFlowTraceFields(fields, fieldName("rate_output"), &b.trace.rateOutput, now)
 	fields = appendVideoFlowTraceFields(fields, fieldName("encoder_input"), &b.trace.encoderInput, now)
@@ -680,7 +620,7 @@ func (b *videoEncoderBranch) monitor() {
 			err := fmt.Errorf("gstreamer %s: %w", source, gstreamerErr)
 			b.logger.Error("gstreamer encoder pipeline error",
 				zap.Uint64("generation", b.generation),
-				zap.String("codec", b.quality.Codec),
+				zap.String("profile", b.quality.Profile),
 				zap.String("source", source),
 				zap.Error(gstreamerErr),
 				zap.String("debug", debug),
@@ -696,7 +636,7 @@ func (b *videoEncoderBranch) monitor() {
 			message.Unref()
 			b.logger.Warn("gstreamer encoder warning",
 				zap.Uint64("generation", b.generation),
-				zap.String("codec", b.quality.Codec),
+				zap.String("profile", b.quality.Profile),
 				zap.String("source", source),
 				zap.Error(warning),
 			)
@@ -786,6 +726,7 @@ type persistentVideoPipeline struct {
 func newPersistentVideoPipeline(
 	stream *capture.Stream,
 	quality Quality,
+	profile EncoderProfile,
 	tuning Tuning,
 	emit func(<-chan struct{}, Sample) bool,
 	active *atomic.Bool,
@@ -796,7 +737,7 @@ func newPersistentVideoPipeline(
 			err = errors.Join(err, stream.Close())
 		}
 	}()
-	if err := quality.Validate(); err != nil {
+	if err := profile.Validate(quality.Profile, quality, tuning); err != nil {
 		return nil, err
 	}
 
@@ -879,7 +820,7 @@ func newPersistentVideoPipeline(
 		return nil, fmt.Errorf("disable capture appsink asynchronous preroll: %w", err)
 	}
 
-	initialBranch, err := newVideoEncoderBranch(1, quality, tuning, emit, logger)
+	initialBranch, err := newVideoEncoderBranch(1, quality, profile, tuning, emit, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -1032,6 +973,7 @@ func (p *persistentVideoPipeline) SetBitrate(bitrateKbps int) error {
 
 func (p *persistentVideoPipeline) ReplaceQuality(
 	quality Quality,
+	profile EncoderProfile,
 	tuning Tuning,
 	timeout time.Duration,
 ) error {
@@ -1049,6 +991,7 @@ func (p *persistentVideoPipeline) ReplaceQuality(
 	candidate, err := newVideoEncoderBranch(
 		p.nextGeneration,
 		quality,
+		profile,
 		tuning,
 		p.emit,
 		p.logger,
@@ -1096,7 +1039,7 @@ func (p *persistentVideoPipeline) ReplaceQuality(
 	}
 	p.logger.Debug("video encoder candidate started",
 		zap.Uint64("generation", candidate.generation),
-		zap.String("codec", quality.Codec),
+		zap.String("profile", quality.Profile),
 		zap.Duration("elapsed", time.Since(started)),
 	)
 
@@ -1117,7 +1060,7 @@ func (p *persistentVideoPipeline) ReplaceQuality(
 	case <-candidate.ready:
 		p.logger.Debug("video encoder candidate ready",
 			zap.Uint64("generation", candidate.generation),
-			zap.String("codec", quality.Codec),
+			zap.String("profile", quality.Profile),
 			zap.Duration("elapsed", time.Since(started)),
 		)
 	case candidateErr := <-candidate.failed:
@@ -1162,7 +1105,8 @@ func (p *persistentVideoPipeline) ReplaceQuality(
 	p.retireBranch(old)
 	p.logger.Info("video encoder branch replaced",
 		zap.Uint64("generation", candidate.generation),
-		zap.String("codec", quality.Codec),
+		zap.String("profile", quality.Profile),
+		zap.String("codec", profile.Codec.ID),
 		zap.Int("width", quality.Width),
 		zap.Int("height", quality.Height),
 		zap.Int("framerate", quality.Framerate),
@@ -1194,7 +1138,7 @@ func (p *persistentVideoPipeline) watchBranch(branch *videoEncoderBranch) {
 		if active {
 			p.fail(fmt.Errorf(
 				"active %s video encoder branch failed: %w",
-				branch.quality.Codec,
+				branch.quality.Profile,
 				err,
 			))
 		}
@@ -1336,7 +1280,7 @@ func (p *persistentVideoPipeline) Close() error {
 			if err := encoderBranch.Close(); err != nil {
 				p.setErr(fmt.Errorf(
 					"close %s video encoder branch: %w",
-					encoderBranch.quality.Codec,
+					encoderBranch.quality.Profile,
 					err,
 				))
 			}

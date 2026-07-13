@@ -1,8 +1,6 @@
 import { z } from "zod";
 
 export const minimumVideoBitrateKbps = 100;
-export const maximumVP8BitrateKbps = 2_147_483;
-export const maximumH264BitrateKbps = 50_000;
 export const maximumClipboardBytes = 32 * 1024 * 1024;
 
 export const clipboardMIMESchema = z.enum([
@@ -24,7 +22,7 @@ const protocolErrorSchema = z
 
 const qualitySchema = z
   .object({
-    codec: z.enum(["vp8", "h264"]),
+    profile: z.string().min(1),
     width: z
       .number()
       .int()
@@ -40,64 +38,35 @@ const qualitySchema = z
     framerate: z.number().int().min(1).max(120),
     bitrate_kbps: z.number().int().min(minimumVideoBitrateKbps),
   })
-  .strict()
-  .superRefine((quality, context) => {
-    if (quality.codec === "vp8") {
-      if (quality.bitrate_kbps > maximumVP8BitrateKbps) {
-        context.addIssue({
-          code: "custom",
-          path: ["bitrate_kbps"],
-          message: `VP8 bitrate must not exceed ${maximumVP8BitrateKbps} Kbit/s`,
-        });
-      }
-      return;
-    }
+  .strict();
 
-    const widthMacroblocks = Math.ceil(quality.width / 16);
-    const heightMacroblocks = Math.ceil(quality.height / 16);
-    const macroblocks = widthMacroblocks * heightMacroblocks;
-    if (widthMacroblocks > 263) {
-      context.addIssue({
-        code: "custom",
-        path: ["width"],
-        message: `H.264 Level 4.2 width must not exceed 263 macroblocks; width ${quality.width} requires ${widthMacroblocks}`,
-      });
-    }
-    if (heightMacroblocks > 263) {
-      context.addIssue({
-        code: "custom",
-        path: ["height"],
-        message: `H.264 Level 4.2 height must not exceed 263 macroblocks; height ${quality.height} requires ${heightMacroblocks}`,
-      });
-    }
-    if (macroblocks > 8704) {
-      context.addIssue({
-        code: "custom",
-        path: ["width"],
-        message: `H.264 Level 4.2 supports at most 8704 macroblocks per frame; ${quality.width}x${quality.height} requires ${macroblocks}`,
-      });
-    }
-    if (macroblocks * quality.framerate > 522_240) {
-      context.addIssue({
-        code: "custom",
-        path: ["framerate"],
-        message: `H.264 Level 4.2 supports at most 522240 macroblocks per second; ${quality.width}x${quality.height} at ${quality.framerate} fps requires ${macroblocks * quality.framerate}`,
-      });
-    }
-    if (quality.bitrate_kbps > maximumH264BitrateKbps) {
-      context.addIssue({
-        code: "custom",
-        path: ["bitrate_kbps"],
-        message: `H.264 Level 4.2 bitrate must not exceed ${maximumH264BitrateKbps} Kbit/s`,
-      });
-    }
-  });
+const videoProfileSchema = z
+  .object({
+    label: z.string().min(1),
+    codec: z
+      .object({
+        id: z.string().min(1),
+        mime_type: z.string().startsWith("video/"),
+        sdp_fmtp_line: z.string(),
+      })
+      .strict(),
+    limits: z
+      .object({
+        max_bitrate_kbps: z.number().int().nonnegative(),
+        max_macroblocks_per_dimension: z.number().int().nonnegative(),
+        max_macroblocks_per_frame: z.number().int().nonnegative(),
+        max_macroblocks_per_second: z.number().int().nonnegative(),
+      })
+      .strict(),
+  })
+  .strict();
 
 export const serverConfigSchema = z
   .object({
-    version: z.literal(1),
+    version: z.literal(2),
     signaling_path: z.string().startsWith("/"),
     video: qualitySchema,
+    video_profiles: z.record(z.string(), videoProfileSchema),
     audio: z
       .object({
         enabled: z.boolean(),
@@ -121,7 +90,57 @@ export const serverConfigSchema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((config, context) => {
+    const profile = config.video_profiles[config.video.profile];
+    if (!profile) {
+      context.addIssue({
+        code: "custom",
+        path: ["video", "profile"],
+        message: `video profile ${config.video.profile} is unavailable`,
+      });
+      return;
+    }
+    const limits = profile.limits;
+    const widthMacroblocks = Math.ceil(config.video.width / 16);
+    const heightMacroblocks = Math.ceil(config.video.height / 16);
+    const macroblocks = widthMacroblocks * heightMacroblocks;
+    if (limits.max_bitrate_kbps > 0 && config.video.bitrate_kbps > limits.max_bitrate_kbps) {
+      context.addIssue({
+        code: "custom",
+        path: ["video", "bitrate_kbps"],
+        message: `${profile.label} bitrate must not exceed ${limits.max_bitrate_kbps} Kbit/s`,
+      });
+    }
+    if (
+      limits.max_macroblocks_per_dimension > 0 &&
+      (widthMacroblocks > limits.max_macroblocks_per_dimension ||
+        heightMacroblocks > limits.max_macroblocks_per_dimension)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["video"],
+        message: `${profile.label} dimensions exceed ${limits.max_macroblocks_per_dimension} macroblocks`,
+      });
+    }
+    if (limits.max_macroblocks_per_frame > 0 && macroblocks > limits.max_macroblocks_per_frame) {
+      context.addIssue({
+        code: "custom",
+        path: ["video"],
+        message: `${profile.label} frame size exceeds ${limits.max_macroblocks_per_frame} macroblocks`,
+      });
+    }
+    if (
+      limits.max_macroblocks_per_second > 0 &&
+      macroblocks * config.video.framerate > limits.max_macroblocks_per_second
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["video", "framerate"],
+        message: `${profile.label} frame rate exceeds ${limits.max_macroblocks_per_second} macroblocks per second`,
+      });
+    }
+  });
 
 const iceCandidateSchema = z
   .object({
@@ -159,7 +178,7 @@ export const signalResponseSchema = z.discriminatedUnion("type", [
 export const controlResponseSchema = z.discriminatedUnion("type", [
   z
     .object({
-      version: z.literal(1),
+      version: z.literal(2),
       id: z.string(),
       type: z.literal("video.quality.set.result"),
       ok: z.literal(true),
@@ -168,7 +187,7 @@ export const controlResponseSchema = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({
-      version: z.literal(1),
+      version: z.literal(2),
       id: z.string(),
       type: z.literal("input.acquire.result"),
       ok: z.literal(true),
@@ -182,7 +201,7 @@ export const controlResponseSchema = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({
-      version: z.literal(1),
+      version: z.literal(2),
       id: z.string(),
       type: z.literal("input.release.result"),
       ok: z.literal(true),
@@ -190,7 +209,7 @@ export const controlResponseSchema = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({
-      version: z.literal(1),
+      version: z.literal(2),
       id: z.string(),
       type: z.literal("error"),
       ok: z.literal(false),
@@ -268,7 +287,7 @@ export type ClientLogMessage = {
 };
 
 export type QualityPatch = {
-  codec?: "vp8" | "h264";
+  profile?: string;
   width?: number;
   height?: number;
   framerate?: number;

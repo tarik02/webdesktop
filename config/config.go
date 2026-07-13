@@ -24,10 +24,12 @@ const (
 	VideoCursorModeHidden   = "hidden"
 	VideoCursorModeEmbedded = "embedded"
 
-	VideoCodecVP8  = "vp8"
-	VideoCodecH264 = "h264"
+	VideoProfileVP8          = "vp8"
+	VideoProfileH264VAAPI    = "h264-vaapi"
+	VideoProfileH264Software = "h264-software"
 
 	AudioDefaultMonitor = media.DefaultAudioMonitor
+	opusPayloadType     = 111
 )
 
 // Config contains the resolved service configuration.
@@ -61,14 +63,15 @@ type Tracing struct {
 
 // Video contains portal capture and encoding settings.
 type Video struct {
-	Source      string      `mapstructure:"source" yaml:"source"`
-	CursorMode  string      `mapstructure:"cursor_mode" yaml:"cursor_mode"`
-	Codec       string      `mapstructure:"codec" yaml:"codec"`
-	Width       int         `mapstructure:"width" yaml:"width"`
-	Height      int         `mapstructure:"height" yaml:"height"`
-	Framerate   int         `mapstructure:"framerate" yaml:"framerate"`
-	BitrateKbps int         `mapstructure:"bitrate_kbps" yaml:"bitrate_kbps"`
-	Tuning      VideoTuning `mapstructure:"tuning" yaml:"tuning"`
+	Source      string                          `mapstructure:"source" yaml:"source"`
+	CursorMode  string                          `mapstructure:"cursor_mode" yaml:"cursor_mode"`
+	Profile     string                          `mapstructure:"profile" yaml:"profile"`
+	Profiles    map[string]media.EncoderProfile `mapstructure:"profiles" yaml:"profiles"`
+	Width       int                             `mapstructure:"width" yaml:"width"`
+	Height      int                             `mapstructure:"height" yaml:"height"`
+	Framerate   int                             `mapstructure:"framerate" yaml:"framerate"`
+	BitrateKbps int                             `mapstructure:"bitrate_kbps" yaml:"bitrate_kbps"`
+	Tuning      VideoTuning                     `mapstructure:"tuning" yaml:"tuning"`
 }
 
 // VideoTuning contains static encoder settings.
@@ -124,7 +127,8 @@ func Defaults() Config {
 		Video: Video{
 			Source:      VideoSourceMonitor,
 			CursorMode:  VideoCursorModeEmbedded,
-			Codec:       VideoCodecVP8,
+			Profile:     VideoProfileVP8,
+			Profiles:    DefaultVideoProfiles(),
 			Width:       1920,
 			Height:      1080,
 			Framerate:   30,
@@ -152,6 +156,155 @@ func Defaults() Config {
 			MaxPeers:       2,
 			ICEServers:     []string{},
 			AllowedOrigins: []string{},
+		},
+	}
+}
+
+// DefaultVideoProfiles returns the built-in runtime-configurable encoder profiles.
+func DefaultVideoProfiles() map[string]media.EncoderProfile {
+	feedback := []media.RTCPFeedback{
+		{Type: "nack"},
+		{Type: "nack", Parameter: "pli"},
+		{Type: "ccm", Parameter: "fir"},
+	}
+	h264Codec := media.RTPCodec{
+		ID:           "h264",
+		MimeType:     "video/H264",
+		ClockRate:    90000,
+		PayloadType:  102,
+		Payloader:    media.PayloaderH264,
+		SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e02a",
+		RTCPFeedback: feedback,
+		SDP: media.SDPRequirements{
+			OfferFmtp: map[string]string{
+				"packetization-mode": "^1$",
+				"profile-level-id":   "(?i)^42e0[0-9a-f]{2}$",
+			},
+			AnswerFmtp: map[string]string{
+				"profile-level-id": "42e02a",
+			},
+		},
+	}
+	h264Limits := media.QualityLimits{
+		MaxBitrateKbps:             50000,
+		MaxMacroblocksPerDimension: 263,
+		MaxMacroblocksPerFrame:     8704,
+		MaxMacroblocksPerSecond:    522240,
+	}
+	return map[string]media.EncoderProfile{
+		VideoProfileVP8: {
+			Label:          "VP8",
+			EncoderElement: "encoder",
+			Pipeline: `videoconvert !
+videoscale method=nearest-neighbour !
+video/x-raw,format=I420,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
+vp8enc name={{ element "encoder" }}
+  target-bitrate={{ mul .BitrateKbps 1000 }}
+  cpu-used={{ .VP8CPUUsed }}
+  threads={{ .Threads }}
+  deadline=1
+  buffer-initial-size=6144
+  buffer-optimal-size=9216
+  buffer-size=12288
+  undershoot=95
+  min-quantizer=4
+  max-quantizer=20
+  error-resilient=default
+  keyframe-max-dist={{ .KeyframeInterval }}
+  end-usage=cbr !
+video/x-vp8`,
+			Bitrate: []media.EncoderProperty{
+				{
+					Element:  "encoder",
+					Property: "target-bitrate",
+					Type:     media.PropertyTypeInt,
+					Value:    `{{ mul .BitrateKbps 1000 }}`,
+				},
+			},
+			Codec: media.RTPCodec{
+				ID:           "vp8",
+				MimeType:     "video/VP8",
+				ClockRate:    90000,
+				PayloadType:  96,
+				Payloader:    media.PayloaderVP8,
+				RTCPFeedback: feedback,
+				SDP: media.SDPRequirements{
+					OfferFmtp:  map[string]string{},
+					AnswerFmtp: map[string]string{},
+				},
+			},
+			Limits: media.QualityLimits{MaxBitrateKbps: 2147483},
+		},
+		VideoProfileH264VAAPI: {
+			Label:          "H.264 (VA-API)",
+			EncoderElement: "encoder",
+			Pipeline: `vapostproc name={{ element "postproc" }} qos=true scale-method=fast !
+video/x-raw(memory:VAMemory),format=NV12,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
+vah264enc name={{ element "encoder" }}
+  bitrate={{ .BitrateKbps }}
+  cpb-size={{ ceilDiv (mul .BitrateKbps 3) .Framerate }}
+  key-int-max={{ .KeyframeInterval }}
+  b-frames=0
+  cabac=false
+  dct8x8=false
+  mbbrc=disabled
+  num-slices=4
+  ref-frames=1
+  target-usage=6
+  rate-control=cbr
+  cc-insert=false !
+h264parse name={{ element "parser" }} config-interval=-1 !
+video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)4.2`,
+			Bitrate: []media.EncoderProperty{
+				{
+					Element:  "encoder",
+					Property: "cpb-size",
+					Type:     media.PropertyTypeUint,
+					Value:    `{{ ceilDiv (mul .BitrateKbps 3) .Framerate }}`,
+				},
+				{
+					Element:  "encoder",
+					Property: "bitrate",
+					Type:     media.PropertyTypeUint,
+					Value:    `{{ .BitrateKbps }}`,
+				},
+			},
+			Codec:  h264Codec,
+			Limits: h264Limits,
+		},
+		VideoProfileH264Software: {
+			Label:          "H.264 (software)",
+			EncoderElement: "encoder",
+			Pipeline: `videoconvert !
+videoscale method=nearest-neighbour !
+video/x-raw,format=I420,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
+x264enc name={{ element "encoder" }}
+  option-string=level=4.2
+  bitrate={{ .BitrateKbps }}
+  vbv-buf-capacity={{ ceilDiv 3000 .Framerate }}
+  key-int-max={{ .KeyframeInterval }}
+  threads={{ .Threads }}
+  speed-preset=ultrafast
+  tune=zerolatency
+  pass=cbr
+  bframes=0
+  cabac=false
+  dct8x8=false
+  ref=1
+  sliced-threads=true
+  byte-stream=true !
+h264parse name={{ element "parser" }} config-interval=-1 !
+video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)4.2`,
+			Bitrate: []media.EncoderProperty{
+				{
+					Element:  "encoder",
+					Property: "bitrate",
+					Type:     media.PropertyTypeUint,
+					Value:    `{{ .BitrateKbps }}`,
+				},
+			},
+			Codec:  h264Codec,
+			Limits: h264Limits,
 		},
 	}
 }
@@ -192,42 +345,21 @@ func (cfg Config) Validate() error {
 		errs = append(errs, errors.New("video.cursor_mode must be hidden or embedded"))
 	}
 
-	switch cfg.Video.Codec {
-	case VideoCodecVP8, VideoCodecH264:
-	default:
-		errs = append(errs, errors.New("video.codec must be vp8 or h264"))
-	}
-
-	if cfg.Video.Width < 320 || cfg.Video.Width > 7680 || cfg.Video.Width%2 != 0 {
-		errs = append(errs, errors.New("video.width must be an even number between 320 and 7680"))
-	}
-	if cfg.Video.Height < 240 || cfg.Video.Height > 4320 || cfg.Video.Height%2 != 0 {
-		errs = append(errs, errors.New("video.height must be an even number between 240 and 4320"))
-	}
-	if cfg.Video.Framerate < 1 || cfg.Video.Framerate > 120 {
-		errs = append(errs, errors.New("video.framerate must be between 1 and 120"))
-	}
-	if cfg.Video.BitrateKbps < media.MinBitrateKbps {
-		errs = append(errs, fmt.Errorf(
-			"video.bitrate_kbps must be at least %d",
-			media.MinBitrateKbps,
-		))
-	}
-	if cfg.Video.Codec == VideoCodecVP8 && cfg.Video.BitrateKbps > media.VP8MaxBitrateKbps {
-		errs = append(errs, fmt.Errorf(
-			"video.bitrate_kbps must not exceed %d for VP8",
-			media.VP8MaxBitrateKbps,
-		))
-	}
-	if cfg.Video.Codec == VideoCodecH264 {
-		errs = append(errs, media.ValidateH264Level42(media.Quality{
-			Codec:       cfg.Video.Codec,
+	errs = append(errs, media.ValidateProfiles(
+		cfg.Video.Profiles,
+		media.Quality{
+			Profile:     cfg.Video.Profile,
 			Width:       cfg.Video.Width,
 			Height:      cfg.Video.Height,
 			Framerate:   cfg.Video.Framerate,
 			BitrateKbps: cfg.Video.BitrateKbps,
-		}))
-	}
+		},
+		media.Tuning{
+			Threads:          cfg.Video.Tuning.Threads,
+			KeyframeInterval: cfg.Video.Tuning.KeyframeInterval,
+			VP8CPUUsed:       cfg.Video.Tuning.VP8CPUUsed,
+		},
+	))
 	if cfg.Video.Tuning.Threads < 1 || cfg.Video.Tuning.Threads > 64 {
 		errs = append(errs, errors.New("video.tuning.threads must be between 1 and 64"))
 	}
@@ -243,6 +375,13 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Audio.BitrateKbps < 6 || cfg.Audio.BitrateKbps > 510 {
 		errs = append(errs, errors.New("audio.bitrate_kbps must be between 6 and 510"))
+	}
+	if cfg.Audio.Enabled {
+		for name, profile := range cfg.Video.Profiles {
+			if profile.Codec.PayloadType == opusPayloadType {
+				errs = append(errs, fmt.Errorf("video profile %q payload type conflicts with Opus", name))
+			}
+		}
 	}
 
 	if cfg.Input.Enabled && !cfg.Input.Pointer && !cfg.Input.Keyboard {

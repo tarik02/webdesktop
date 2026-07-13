@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -9,9 +10,13 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
 	pion "github.com/pion/webrtc/v4"
+	"github.com/tarik02/webdesktop/media"
 )
 
-const outboundMTU = 1200
+const (
+	outboundMTU   = 1200
+	payloaderOpus = "opus"
+)
 
 type trackBinding struct {
 	id         string
@@ -23,6 +28,7 @@ type trackBinding struct {
 
 type sampleTrack struct {
 	capability pion.RTPCodecCapability
+	payloader  string
 	kind       pion.RTPCodecType
 	id         string
 	streamID   string
@@ -31,8 +37,8 @@ type sampleTrack struct {
 	bindings map[string]*trackBinding
 }
 
-func newSampleTrack(capability pion.RTPCodecCapability, kind pion.RTPCodecType, id string, streamID string) *sampleTrack {
-	return &sampleTrack{capability: capability, kind: kind, id: id, streamID: streamID, bindings: make(map[string]*trackBinding)}
+func newSampleTrack(capability pion.RTPCodecCapability, payloader string, kind pion.RTPCodecType, id string, streamID string) *sampleTrack {
+	return &sampleTrack{capability: capability, payloader: payloader, kind: kind, id: id, streamID: streamID, bindings: make(map[string]*trackBinding)}
 }
 
 func (t *sampleTrack) Bind(context pion.TrackLocalContext) (pion.RTPCodecParameters, error) {
@@ -49,11 +55,16 @@ func (t *sampleTrack) Bind(context pion.TrackLocalContext) (pion.RTPCodecParamet
 		return pion.RTPCodecParameters{}, pion.ErrUnsupportedCodec
 	}
 
-	var payloader rtp.Payloader = &codecs.VP8Payloader{}
-	if strings.EqualFold(t.capability.MimeType, pion.MimeTypeH264) {
+	var payloader rtp.Payloader
+	switch t.payloader {
+	case media.PayloaderVP8:
+		payloader = &codecs.VP8Payloader{}
+	case media.PayloaderH264:
 		payloader = &codecs.H264Payloader{}
-	} else if strings.EqualFold(t.capability.MimeType, pion.MimeTypeOpus) {
+	case payloaderOpus:
 		payloader = &codecs.OpusPayloader{}
+	default:
+		return pion.RTPCodecParameters{}, fmt.Errorf("unsupported RTP payloader %q", t.payloader)
 	}
 
 	binding := &trackBinding{

@@ -49,7 +49,7 @@ func newServeCommand() *cobra.Command {
 	flags.Bool("tracing-enabled", defaults.Tracing.Enabled, "enable bounded WebRTC and browser diagnostics")
 	flags.String("video-source", defaults.Video.Source, "portal video source (monitor)")
 	flags.String("video-cursor-mode", defaults.Video.CursorMode, "captured cursor mode (hidden or embedded)")
-	flags.String("video-codec", defaults.Video.Codec, "video codec (vp8 or h264)")
+	flags.String("video-profile", defaults.Video.Profile, "video encoder profile")
 	flags.Int("video-width", defaults.Video.Width, "encoded video width")
 	flags.Int("video-height", defaults.Video.Height, "encoded video height")
 	flags.Int("video-framerate", defaults.Video.Framerate, "encoded video frames per second")
@@ -92,7 +92,8 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("tracing.enabled", defaults.Tracing.Enabled)
 	v.SetDefault("video.source", defaults.Video.Source)
 	v.SetDefault("video.cursor_mode", defaults.Video.CursorMode)
-	v.SetDefault("video.codec", defaults.Video.Codec)
+	v.SetDefault("video.profile", defaults.Video.Profile)
+	v.SetDefault("video.profiles", defaults.Video.Profiles)
 	v.SetDefault("video.width", defaults.Video.Width)
 	v.SetDefault("video.height", defaults.Video.Height)
 	v.SetDefault("video.framerate", defaults.Video.Framerate)
@@ -125,7 +126,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"tracing.enabled",
 		"video.source",
 		"video.cursor_mode",
-		"video.codec",
+		"video.profile",
 		"video.width",
 		"video.height",
 		"video.framerate",
@@ -163,7 +164,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"tracing-enabled":         "tracing.enabled",
 		"video-source":            "video.source",
 		"video-cursor-mode":       "video.cursor_mode",
-		"video-codec":             "video.codec",
+		"video-profile":           "video.profile",
 		"video-width":             "video.width",
 		"video-height":            "video.height",
 		"video-framerate":         "video.framerate",

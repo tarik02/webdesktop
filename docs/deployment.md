@@ -10,8 +10,9 @@ Webdesktop runs inside an active KDE Plasma Wayland session. It requires:
 - libei
 - `pipewire-pulse` when desktop audio is enabled
 
-VP8 uses the software `vp8enc` encoder. H.264 uses `vah264enc` and requires a
-working VA-API driver.
+The built-in profiles use `vp8enc`, `x264enc`, and `vah264enc`. The VA-API H.264
+profile requires a working VA-API driver; the VP8 and software H.264 profiles do
+not.
 
 ## Build and run
 

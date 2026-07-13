@@ -2,12 +2,13 @@ package webrtc
 
 import (
 	"bytes"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -18,7 +19,7 @@ import (
 
 const (
 	signalingVersion = 1
-	controlVersion   = 1
+	controlVersion   = 2
 	inputVersion     = 1
 
 	signalTypeOffer        = "offer"
@@ -199,7 +200,7 @@ type signalResponse struct {
 }
 
 type qualityPatch struct {
-	Codec       optionalString `json:"codec"`
+	Profile     optionalString `json:"profile"`
 	Width       optionalInt    `json:"width"`
 	Height      optionalInt    `json:"height"`
 	Framerate   optionalInt    `json:"framerate"`
@@ -239,7 +240,7 @@ type controlRequest struct {
 }
 
 type controlQuality struct {
-	Codec       string `json:"codec"`
+	Profile     string `json:"profile"`
 	Width       int    `json:"width"`
 	Height      int    `json:"height"`
 	Framerate   int    `json:"framerate"`
@@ -339,7 +340,7 @@ func decodeInputRequest(data []byte) (inputRequest, error) {
 
 func qualityResponse(quality media.Quality) *controlQuality {
 	return &controlQuality{
-		Codec:       quality.Codec,
+		Profile:     quality.Profile,
 		Width:       quality.Width,
 		Height:      quality.Height,
 		Framerate:   quality.Framerate,
@@ -461,17 +462,13 @@ func validateControlRequest(request controlRequest) *protocolError {
 			Message: "quality is required",
 		}
 	}
-	if request.Quality.Value.Codec.Set {
-		switch request.Quality.Value.Codec.Value {
-		case media.CodecVP8, media.CodecH264:
-		default:
-			return &protocolError{
-				Code:    "invalid_quality",
-				Message: "quality codec must be vp8 or h264",
-			}
+	if request.Quality.Value.Profile.Set && request.Quality.Value.Profile.Value == "" {
+		return &protocolError{
+			Code:    "invalid_quality",
+			Message: "quality profile must not be empty",
 		}
 	}
-	if !request.Quality.Value.Codec.Set &&
+	if !request.Quality.Value.Profile.Set &&
 		!request.Quality.Value.Width.Set &&
 		!request.Quality.Value.Height.Set &&
 		!request.Quality.Value.Framerate.Set &&
@@ -713,7 +710,7 @@ func validateAudioOffer(raw string) error {
 	}
 }
 
-func validateH264Offer(raw string) error {
+func validateVideoOffer(raw string, codec media.RTPCodec) error {
 	description := pion.SessionDescription{
 		Type: pion.SDPTypeOffer,
 		SDP:  raw,
@@ -727,15 +724,26 @@ func validateH264Offer(raw string) error {
 		if mediaDescription.MediaName.Media != "video" {
 			continue
 		}
-		h264Payloads := make(map[string]struct{})
+		codecPayloads := make(map[string]struct{})
 		for _, attribute := range mediaDescription.Attributes {
 			if attribute.Key != "rtpmap" {
 				continue
 			}
 			fields := strings.Fields(attribute.Value)
-			if len(fields) == 2 && strings.EqualFold(strings.Split(fields[1], "/")[0], "H264") {
-				h264Payloads[fields[0]] = struct{}{}
+			if len(fields) != 2 {
+				continue
 			}
+			codecFields := strings.Split(fields[1], "/")
+			if len(codecFields) >= 2 &&
+				strings.EqualFold(codecFields[0], strings.TrimPrefix(codec.MimeType, "video/")) &&
+				codecFields[1] == strconv.FormatUint(uint64(codec.ClockRate), 10) &&
+				((codec.Channels == 0 && len(codecFields) == 2) ||
+					(codec.Channels > 0 && len(codecFields) == 3 && codecFields[2] == strconv.FormatUint(uint64(codec.Channels), 10))) {
+				codecPayloads[fields[0]] = struct{}{}
+			}
+		}
+		if len(codec.SDP.OfferFmtp) == 0 && len(codecPayloads) > 0 {
+			return nil
 		}
 		for _, attribute := range mediaDescription.Attributes {
 			if attribute.Key != "fmtp" {
@@ -745,7 +753,7 @@ func validateH264Offer(raw string) error {
 			if len(fields) != 2 {
 				continue
 			}
-			if _, ok := h264Payloads[fields[0]]; !ok {
+			if _, ok := codecPayloads[fields[0]]; !ok {
 				continue
 			}
 
@@ -753,27 +761,26 @@ func validateH264Offer(raw string) error {
 			for _, parameter := range strings.Split(fields[1], ";") {
 				key, value, ok := strings.Cut(parameter, "=")
 				if ok {
-					parameters[strings.ToLower(strings.TrimSpace(key))] = strings.ToLower(strings.TrimSpace(value))
+					parameters[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(value)
 				}
 			}
-			if parameters["packetization-mode"] != "1" {
-				continue
+			compatible := true
+			for key, pattern := range codec.SDP.OfferFmtp {
+				value, exists := parameters[strings.ToLower(key)]
+				if !exists || !regexp.MustCompile(pattern).MatchString(value) {
+					compatible = false
+					break
+				}
 			}
-			profileLevelID, err := hex.DecodeString(parameters["profile-level-id"])
-			if err != nil || len(profileLevelID) != 3 {
-				continue
-			}
-			if profileLevelID[0] == 0x42 &&
-				profileLevelID[1] == 0xe0 &&
-				(profileLevelID[2] >= 0x2a || parameters["level-asymmetry-allowed"] == "1") {
+			if compatible {
 				return nil
 			}
 		}
 	}
-	return errors.New("offer does not support browser-compatible H.264 constrained-baseline with packetization mode 1 and Level 4.2 or level asymmetry")
+	return fmt.Errorf("offer does not support configured video codec %q", codec.ID)
 }
 
-func rewriteH264Answer(raw string) (string, error) {
+func rewriteVideoAnswer(raw string, codec media.RTPCodec) (string, error) {
 	description := pion.SessionDescription{
 		Type: pion.SDPTypeAnswer,
 		SDP:  raw,
@@ -783,19 +790,27 @@ func rewriteH264Answer(raw string) (string, error) {
 		return "", err
 	}
 
-	rewritten := false
+	rewritten := make(map[string]bool, len(codec.SDP.AnswerFmtp))
 	for _, mediaDescription := range parsed.MediaDescriptions {
 		if mediaDescription.MediaName.Media != "video" {
 			continue
 		}
-		h264Payloads := make(map[string]struct{})
+		codecPayloads := make(map[string]struct{})
 		for _, attribute := range mediaDescription.Attributes {
 			if attribute.Key != "rtpmap" {
 				continue
 			}
 			fields := strings.Fields(attribute.Value)
-			if len(fields) == 2 && strings.EqualFold(strings.Split(fields[1], "/")[0], "H264") {
-				h264Payloads[fields[0]] = struct{}{}
+			if len(fields) != 2 {
+				continue
+			}
+			codecFields := strings.Split(fields[1], "/")
+			if len(codecFields) >= 2 &&
+				strings.EqualFold(codecFields[0], strings.TrimPrefix(codec.MimeType, "video/")) &&
+				codecFields[1] == strconv.FormatUint(uint64(codec.ClockRate), 10) &&
+				((codec.Channels == 0 && len(codecFields) == 2) ||
+					(codec.Channels > 0 && len(codecFields) == 3 && codecFields[2] == strconv.FormatUint(uint64(codec.Channels), 10))) {
+				codecPayloads[fields[0]] = struct{}{}
 			}
 		}
 		for index := range mediaDescription.Attributes {
@@ -807,25 +822,27 @@ func rewriteH264Answer(raw string) (string, error) {
 			if len(fields) != 2 {
 				continue
 			}
-			if _, ok := h264Payloads[fields[0]]; !ok {
+			if _, ok := codecPayloads[fields[0]]; !ok {
 				continue
 			}
 
 			parameters := strings.Split(fields[1], ";")
-			for parameterIndex, parameter := range parameters {
-				key, _, ok := strings.Cut(parameter, "=")
-				if !ok || !strings.EqualFold(strings.TrimSpace(key), "profile-level-id") {
-					continue
+			for key, value := range codec.SDP.AnswerFmtp {
+				for parameterIndex, parameter := range parameters {
+					parameterKey, _, ok := strings.Cut(parameter, "=")
+					if !ok || !strings.EqualFold(strings.TrimSpace(parameterKey), key) {
+						continue
+					}
+					parameters[parameterIndex] = key + "=" + value
+					attribute.Value = fields[0] + " " + strings.Join(parameters, ";")
+					rewritten[key] = true
+					break
 				}
-				parameters[parameterIndex] = "profile-level-id=" + media.H264SDPProfileLevelID
-				attribute.Value = fields[0] + " " + strings.Join(parameters, ";")
-				rewritten = true
-				break
 			}
 		}
 	}
-	if !rewritten {
-		return "", errors.New("H.264 answer did not contain profile-level-id")
+	if len(rewritten) != len(codec.SDP.AnswerFmtp) {
+		return "", fmt.Errorf("video answer did not contain configured %s fmtp parameters", codec.ID)
 	}
 
 	data, err := parsed.Marshal()

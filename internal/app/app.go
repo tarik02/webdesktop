@@ -61,9 +61,10 @@ func New(cfg config.Config) (*App, error) {
 	clipboardController := clipboard.New(cfg.Clipboard.Enabled)
 
 	mediaService, err := media.New(media.Config{
-		Capture: portalConfig,
+		Capture:  portalConfig,
+		Profiles: cfg.Video.Profiles,
 		Quality: media.Quality{
-			Codec:       cfg.Video.Codec,
+			Profile:     cfg.Video.Profile,
 			Width:       cfg.Video.Width,
 			Height:      cfg.Video.Height,
 			Framerate:   cfg.Video.Framerate,
@@ -105,7 +106,6 @@ func New(cfg config.Config) (*App, error) {
 	}
 
 	webrtcService, err := rtc.New(rtc.Config{
-		Codec:          cfg.Video.Codec,
 		AudioEnabled:   cfg.Audio.Enabled,
 		ICEServers:     cfg.WebRTC.ICEServers,
 		ICEUsername:    cfg.WebRTC.ICEUsername,
@@ -122,12 +122,34 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
+	type browserVideoProfile struct {
+		Label string `json:"label"`
+		Codec struct {
+			ID          string `json:"id"`
+			MimeType    string `json:"mime_type"`
+			SDPFmtpLine string `json:"sdp_fmtp_line"`
+		} `json:"codec"`
+		Limits media.QualityLimits `json:"limits"`
+	}
+	browserProfiles := make(map[string]browserVideoProfile, len(cfg.Video.Profiles))
+	for name, profile := range cfg.Video.Profiles {
+		entry := browserVideoProfile{
+			Label:  profile.Label,
+			Limits: profile.Limits,
+		}
+		entry.Codec.ID = profile.Codec.ID
+		entry.Codec.MimeType = profile.Codec.MimeType
+		entry.Codec.SDPFmtpLine = profile.Codec.SDPFmtpLine
+		browserProfiles[name] = entry
+	}
+
 	server, err := httpserver.New(cfg.Server, logger, func(router *gin.Engine) {
 		router.GET("/api/config", func(c *gin.Context) {
 			c.JSON(200, struct {
-				Version       int           `json:"version"`
-				SignalingPath string        `json:"signaling_path"`
-				Video         media.Quality `json:"video"`
+				Version       int                            `json:"version"`
+				SignalingPath string                         `json:"signaling_path"`
+				Video         media.Quality                  `json:"video"`
+				VideoProfiles map[string]browserVideoProfile `json:"video_profiles"`
 				Audio         struct {
 					Enabled bool `json:"enabled"`
 				} `json:"audio"`
@@ -143,9 +165,10 @@ func New(cfg config.Config) (*App, error) {
 					Enabled bool `json:"enabled"`
 				} `json:"clipboard"`
 			}{
-				Version:       1,
+				Version:       2,
 				SignalingPath: cfg.WebRTC.SignalingPath,
 				Video:         mediaService.Quality(),
+				VideoProfiles: browserProfiles,
 				Audio: struct {
 					Enabled bool `json:"enabled"`
 				}{Enabled: cfg.Audio.Enabled},

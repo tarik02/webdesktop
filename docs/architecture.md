@@ -9,7 +9,7 @@ xdg-desktop-portal
   -> PipeWire remote
   -> pipewiresrc
   -> newest raw frame
-  -> VP8 or VA H.264 encoder
+  -> configured encoder profile
   -> Pion RTP
   -> WebRTC peers
 ```
@@ -42,27 +42,33 @@ Encoded samples use blocking handoff. Encoded reference chains are not dropped
 between the encoder and peer writers. There is no per-peer video queue or
 packet pacer.
 
-## Encoders and quality changes
+## Encoder profiles and quality changes
 
-VP8 uses `vp8enc` with a short rate-control buffer, bounded intra frames, and a
-realtime CPU setting.
+Encoder profiles come from runtime configuration. Each profile contains its
+GStreamer pipeline template, live bitrate properties, quality limits, RTP codec
+capability, packetizer selection, RTCP feedback, and SDP constraints. Adding an
+encoder for an existing supported RTP payloader does not require a codec branch
+in the service.
 
-H.264 uses `vah264enc` in constrained-baseline Level 4.2 byte-stream mode. It
-uses VA CBR control, no B-frames, one reference frame, four slices, disabled
-CABAC, and disabled macroblock bitrate control. SDP advertises the
-libwebrtc-compatible `42e02a` profile-level identifier.
+The built-in VP8 profile uses `vp8enc` with a short rate-control buffer, bounded
+intra frames, and a realtime CPU setting. The software H.264 profile uses
+`x264enc` with the ultrafast zero-latency preset. The VA-API H.264 profile uses
+`vah264enc`. Both H.264 profiles produce constrained-baseline Level 4.2 byte
+streams and advertise the libwebrtc-compatible `42e02a` profile-level
+identifier.
 
 All peers share one encoded stream. A bitrate-only change updates the active
-encoder while it is playing. H.264 updates its CPB request and target bitrate
-together.
+encoder while it is playing using the profile's configured properties. The
+VA-API profile updates its CPB request and target bitrate together.
 
 Resolution and frame-rate changes create a candidate encoder branch against
 the current latest-frame slot. The service switches only after the candidate
 produces an IDR, then retires the old branch. A failed candidate leaves the
 active stream unchanged.
 
-A codec change needs a new SDP offer and answer. The embedded client reconnects
-after the new encoder becomes active.
+A profile change with different codec metadata needs a new SDP offer and answer.
+The embedded client reconnects after the new encoder becomes active. Profiles
+with identical codec metadata switch without reconnecting.
 
 ## RTP timing and recovery
 
@@ -98,7 +104,7 @@ The pipeline design was informed by:
 - [Neko's GStreamer capture pipelines](https://github.com/m1k1o/neko/blob/d74052bb844c43a0cc3c2386d083f7505dc483a2/server/internal/config/capture_pipeline.go)
   and [direct encoded-sample handoff](https://github.com/m1k1o/neko/blob/d74052bb844c43a0cc3c2386d083f7505dc483a2/server/internal/webrtc/track.go).
 - [Selkies' GStreamer WebRTC implementation](https://github.com/selkies-project/selkies/blob/7a80d7eea94f7ff5e754407a18364f4008d8b0fd/src/selkies_gstreamer/gstwebrtc_app.py),
-  especially VA H.264 settings and live bitrate changes.
+  especially H.264 settings and live bitrate changes.
 - [KDE KRDP/KPipeWire's VideoStream](https://github.com/KDE/krdp/blob/7396f77f44e3e4515a1d6182ef4ad4f267f8e986/src/VideoStream.cpp)
   for native Wayland PipeWire capture.
 

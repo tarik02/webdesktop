@@ -257,14 +257,14 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	}
 	qualityCurrent := p.service.source.Quality()
 	quality := media.Quality{
-		Codec:       qualityCurrent.Codec,
+		Profile:     qualityCurrent.Profile,
 		Width:       qualityCurrent.Width,
 		Height:      qualityCurrent.Height,
 		Framerate:   qualityCurrent.Framerate,
 		BitrateKbps: qualityCurrent.BitrateKbps,
 	}
-	if request.Quality.Value.Codec.Set {
-		quality.Codec = request.Quality.Value.Codec.Value
+	if request.Quality.Value.Profile.Set {
+		quality.Profile = request.Quality.Value.Profile.Value
 	}
 	if request.Quality.Value.Width.Set {
 		quality.Width = request.Quality.Value.Width.Value
@@ -278,16 +278,14 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	if request.Quality.Value.BitrateKbps.Set {
 		quality.BitrateKbps = request.Quality.Value.BitrateKbps.Value
 	}
-	if quality.Codec == media.CodecH264 {
-		if err := media.ValidateH264Level42(quality); err != nil {
-			p.service.qualityChangeMu.Unlock()
-			p.writeControlError(channel, request.ID.Value, "h264_level_incompatible", err.Error())
-			return
-		}
-	}
 	err = p.service.source.UpdateQuality(quality)
 	effective := p.service.source.Quality()
-	codecChanged := err == nil && effective.Codec != qualityCurrent.Codec
+	currentProfile, currentExists := p.service.source.Profile(qualityCurrent.Profile)
+	effectiveProfile, effectiveExists := p.service.source.Profile(effective.Profile)
+	if err == nil && (!currentExists || !effectiveExists) {
+		err = errors.New("media profile metadata is unavailable after quality update")
+	}
+	codecChanged := err == nil && currentExists && effectiveExists && !currentProfile.Codec.Compatible(effectiveProfile.Codec)
 	var qualityGeneration uint64
 	var incompatiblePeers []*peer
 	if codecChanged {
@@ -296,7 +294,7 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		qualityGeneration = p.service.qualityGeneration
 		p.service.qualityMu.Unlock()
 		for _, candidate := range p.service.peerSnapshot() {
-			if candidate != p && candidate.videoCodec != effective.Codec {
+			if candidate != p && !candidate.videoCodec.Compatible(effectiveProfile.Codec) {
 				incompatiblePeers = append(incompatiblePeers, candidate)
 			}
 		}
