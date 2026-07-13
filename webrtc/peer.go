@@ -35,6 +35,116 @@ const (
 	peerConnectionCloseTimeout = 2 * time.Second
 )
 
+type videoPutResult struct {
+	accepted bool
+	replaced bool
+}
+
+type videoMailbox struct {
+	mu      sync.Mutex
+	pending *media.Sample
+	wake    chan struct{}
+}
+
+func newVideoMailbox() videoMailbox { return videoMailbox{wake: make(chan struct{}, 1)} }
+func (m *videoMailbox) put(sample media.Sample) videoPutResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pending != nil && m.pending.KeyFrame && !sample.KeyFrame {
+		return videoPutResult{}
+	}
+	replaced := m.pending != nil
+	m.pending = &sample
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+	return videoPutResult{accepted: true, replaced: replaced}
+}
+func (m *videoMailbox) take(ctx context.Context) (media.Sample, bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			return media.Sample{}, false
+		case <-m.wake:
+			m.mu.Lock()
+			if m.pending != nil {
+				sample := *m.pending
+				m.pending = nil
+				m.mu.Unlock()
+				return sample, true
+			}
+			m.mu.Unlock()
+		}
+	}
+}
+func (m *videoMailbox) len() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pending == nil {
+		return 0
+	}
+	return 1
+}
+
+const audioMailboxCapacity = 4
+
+type audioMailbox struct {
+	mu    sync.Mutex
+	queue []media.AudioSample
+	wake  chan struct{}
+}
+
+func newAudioMailbox() audioMailbox { return audioMailbox{wake: make(chan struct{}, 1)} }
+func (m *audioMailbox) signalLocked() {
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+func (m *audioMailbox) put(sample media.AudioSample) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	dropped := 0
+	if len(m.queue) == audioMailboxCapacity {
+		copy(m.queue, m.queue[1:])
+		m.queue[len(m.queue)-1] = sample
+		dropped = 1
+	} else {
+		m.queue = append(m.queue, sample)
+	}
+	m.signalLocked()
+	return dropped
+}
+func (m *audioMailbox) take(ctx context.Context) (media.AudioSample, bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			return media.AudioSample{}, false
+		case <-m.wake:
+			m.mu.Lock()
+			if len(m.queue) > 0 {
+				sample := m.queue[0]
+				m.queue = m.queue[1:]
+				if len(m.queue) > 0 {
+					m.signalLocked()
+				}
+				m.mu.Unlock()
+				return sample, true
+			}
+			m.mu.Unlock()
+		}
+	}
+}
+func (m *audioMailbox) len() int { m.mu.Lock(); defer m.mu.Unlock(); return len(m.queue) }
+
+func positiveDiscontinuityDuration(duration time.Duration, clockRate uint32) time.Duration {
+	if duration > 0 {
+		return duration
+	}
+	return time.Second / time.Duration(clockRate)
+}
+
 type peer struct {
 	id      uint64
 	service *Service
@@ -45,10 +155,10 @@ type peer struct {
 	videoSender  *pion.RTPSender
 	videoTrack   *sampleTrack
 	videoCodec   string
-	videoSamples chan media.Sample
+	videoSamples videoMailbox
 	audioSender  *pion.RTPSender
 	audioTrack   *sampleTrack
-	audioSamples chan media.AudioSample
+	audioSamples audioMailbox
 
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -150,7 +260,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		pc:           peerConnection,
 		videoTrack:   videoTrack,
 		videoCodec:   quality.Codec,
-		videoSamples: make(chan media.Sample),
+		videoSamples: newVideoMailbox(),
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -174,7 +284,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 			fmt.Sprintf("audio-%d", id),
 			"desktop",
 		)
-		peer.audioSamples = make(chan media.AudioSample)
+		peer.audioSamples = newAudioMailbox()
 		audioSender, err := peerConnection.AddTrack(peer.audioTrack)
 		if err != nil {
 			peer.Close()
@@ -613,7 +723,7 @@ func (p *peer) logTraceSnapshot() {
 		zap.String("signaling_state", p.pc.SignalingState().String()),
 		zap.String("control_channel_state", controlState),
 		zap.String("input_channel_state", inputState),
-		zap.Int("video_queue_length", len(p.videoSamples)),
+		zap.Int("video_queue_length", p.videoSamples.len()),
 		zap.Uint64("video_samples_seen", p.videoSamplesSeen.Load()),
 		zap.Uint64("video_samples_enqueued", p.videoSamplesEnqueued.Load()),
 		zap.Uint64("video_samples_dropped", p.videoSamplesDropped.Load()),
@@ -639,9 +749,9 @@ func (p *peer) logTraceSnapshot() {
 		zap.Uint64("input_messages_sent", p.inputMessagesSent.Load()),
 		zap.Uint64("input_overloads", p.inputOverloads.Load()),
 	}
-	if p.audioSamples != nil {
+	if p.audioTrack != nil {
 		fields = append(fields,
-			zap.Int("audio_queue_length", len(p.audioSamples)),
+			zap.Int("audio_queue_length", p.audioSamples.len()),
 			zap.Uint64("audio_samples_seen", p.audioSamplesSeen.Load()),
 			zap.Uint64("audio_samples_enqueued", p.audioSamplesEnqueued.Load()),
 			zap.Uint64("audio_samples_dropped", p.audioSamplesDropped.Load()),
@@ -993,13 +1103,17 @@ func (p *peer) enqueueVideo(sample media.Sample) {
 		p.videoSamplesDropped.Add(1)
 		return
 	}
-	select {
-	case p.videoSamples <- sample:
+	result := p.videoSamples.put(sample)
+	if result.accepted {
 		p.videoSamplesEnqueued.Add(1)
+		if result.replaced {
+			p.videoSamplesDropped.Add(1)
+		}
 		if sample.KeyFrame {
 			p.videoNeedsKeyframe.Store(false)
 		}
-	case <-p.ctx.Done():
+	} else {
+		p.videoSamplesDropped.Add(1)
 	}
 }
 
@@ -1008,85 +1122,116 @@ func (p *peer) enqueueAudio(sample media.AudioSample) {
 		return
 	}
 	p.audioSamplesSeen.Add(1)
-	select {
-	case p.audioSamples <- sample:
-		p.audioSamplesEnqueued.Add(1)
-	case <-p.ctx.Done():
-	}
+	dropped := p.audioSamples.put(sample)
+	p.audioSamplesEnqueued.Add(1)
+	p.audioSamplesDropped.Add(uint64(dropped))
 }
 
 func (p *peer) writeVideoSamples() {
 	var origin time.Time
 	var previousProducedAt time.Time
 	var previousPTS time.Duration
+	var firstPTS time.Duration
+	var rtpAnchorTicks uint64
 	var rtpTicksTotal uint64
 	havePreviousPTS := false
 	for {
-		select {
-		case <-p.ctx.Done():
+		sample, ok := p.videoSamples.take(p.ctx)
+		if !ok {
 			return
-		case sample := <-p.videoSamples:
-			if origin.IsZero() {
-				origin = sample.ProducedAt
-			}
-			producedElapsed := sample.ProducedAt.Sub(origin)
-			var productionGap time.Duration
-			if !previousProducedAt.IsZero() {
-				productionGap = sample.ProducedAt.Sub(previousProducedAt)
-			}
-			if havePreviousPTS && sample.PTS <= previousPTS {
-				p.videoPTSRegressions.Add(1)
-			}
-			sampleAge := time.Since(sample.ProducedAt)
-			p.videoSampleAge.Store(int64(sampleAge))
-			for previousMax := p.videoMaxSampleAge.Load(); int64(sampleAge) > previousMax; previousMax = p.videoMaxSampleAge.Load() {
-				if p.videoMaxSampleAge.CompareAndSwap(previousMax, int64(sampleAge)) {
-					break
-				}
-			}
-			writeStarted := time.Now()
-			rtpTicks, err := p.videoTrack.WriteSampleAt(sample.Data, productionGap)
-			if err != nil {
-				if p.ctx.Err() == nil {
-					p.logger.Debug("peer video writer stopped", zap.Error(err))
-					go p.closeWith(websocket.CloseGoingAway, "video transport stopped")
-				}
-				return
-			}
-			writeDuration := time.Since(writeStarted)
-			p.videoWriteDuration.Store(int64(writeDuration))
-			for previousMax := p.videoMaxWrite.Load(); int64(writeDuration) > previousMax; previousMax = p.videoMaxWrite.Load() {
-				if p.videoMaxWrite.CompareAndSwap(previousMax, int64(writeDuration)) {
-					break
-				}
-			}
-			p.videoSamplesWritten.Add(1)
-			p.videoBytesWritten.Add(uint64(len(sample.Data)))
-			rtpTicksTotal += rtpTicks
-			clockRate := uint64(p.videoTrack.capability.ClockRate)
-			rtpElapsed := time.Duration(rtpTicksTotal/clockRate)*time.Second +
-				time.Duration((rtpTicksTotal%clockRate)*uint64(time.Second)/clockRate)
-			p.videoProducedElapsed.Store(int64(producedElapsed))
-			p.videoRTPElapsed.Store(int64(rtpElapsed))
-			p.videoProductionGap.Store(int64(productionGap))
-			p.videoSampleDuration.Store(int64(sample.Duration))
-			p.videoTimingDrift.Store(int64(rtpElapsed - producedElapsed))
-			p.videoRTPTicks.Store(rtpTicksTotal)
-			p.videoLastRTPTicks.Store(rtpTicks)
-			previousProducedAt = sample.ProducedAt
-			previousPTS = sample.PTS
-			havePreviousPTS = true
 		}
+		if origin.IsZero() {
+			origin = sample.ProducedAt
+		}
+		producedElapsed := sample.ProducedAt.Sub(origin)
+		var productionGap time.Duration
+		if !previousProducedAt.IsZero() {
+			productionGap = sample.ProducedAt.Sub(previousProducedAt)
+		}
+		ptsRegressed := havePreviousPTS && sample.PTS <= previousPTS
+		if ptsRegressed {
+			p.videoPTSRegressions.Add(1)
+			if !sample.KeyFrame {
+				p.videoNeedsKeyframe.Store(true)
+				p.videoSamplesDropped.Add(1)
+				continue
+			}
+		}
+		timestampAdvance := time.Duration(0)
+		if havePreviousPTS {
+			if ptsRegressed {
+				timestampAdvance = positiveDiscontinuityDuration(sample.Duration, p.videoTrack.capability.ClockRate)
+			} else {
+				timestampAdvance = sample.PTS - previousPTS
+			}
+		}
+		sampleAge := time.Since(sample.ProducedAt)
+		p.videoSampleAge.Store(int64(sampleAge))
+		for previousMax := p.videoMaxSampleAge.Load(); int64(sampleAge) > previousMax; previousMax = p.videoMaxSampleAge.Load() {
+			if p.videoMaxSampleAge.CompareAndSwap(previousMax, int64(sampleAge)) {
+				break
+			}
+		}
+		writeStarted := time.Now()
+		rtpTicks, err := p.videoTrack.WriteSample(sample.Data, timestampAdvance)
+		if err != nil {
+			if p.ctx.Err() == nil {
+				p.logger.Debug("peer video writer stopped", zap.Error(err))
+				go p.closeWith(websocket.CloseGoingAway, "video transport stopped")
+			}
+			return
+		}
+		writeDuration := time.Since(writeStarted)
+		p.videoWriteDuration.Store(int64(writeDuration))
+		for previousMax := p.videoMaxWrite.Load(); int64(writeDuration) > previousMax; previousMax = p.videoMaxWrite.Load() {
+			if p.videoMaxWrite.CompareAndSwap(previousMax, int64(writeDuration)) {
+				break
+			}
+		}
+		p.videoSamplesWritten.Add(1)
+		p.videoBytesWritten.Add(uint64(len(sample.Data)))
+		rtpTicksTotal += uint64(rtpTicks)
+		clockRate := uint64(p.videoTrack.capability.ClockRate)
+		rtpElapsed := time.Duration(rtpTicksTotal/clockRate)*time.Second +
+			time.Duration((rtpTicksTotal%clockRate)*uint64(time.Second)/clockRate)
+		p.videoProducedElapsed.Store(int64(producedElapsed))
+		p.videoRTPElapsed.Store(int64(rtpElapsed))
+		p.videoProductionGap.Store(int64(productionGap))
+		p.videoSampleDuration.Store(int64(sample.Duration))
+		if !havePreviousPTS || ptsRegressed {
+			firstPTS = sample.PTS
+			rtpAnchorTicks = rtpTicksTotal
+		}
+		mediaElapsed := sample.PTS - firstPTS
+		rtpMediaElapsed := time.Duration((rtpTicksTotal-rtpAnchorTicks)/clockRate)*time.Second + time.Duration(((rtpTicksTotal-rtpAnchorTicks)%clockRate)*uint64(time.Second)/clockRate)
+		p.videoTimingDrift.Store(int64(rtpMediaElapsed - mediaElapsed))
+		p.videoRTPTicks.Store(rtpTicksTotal)
+		p.videoLastRTPTicks.Store(uint64(rtpTicks))
+		previousProducedAt = sample.ProducedAt
+		previousPTS = sample.PTS
+		havePreviousPTS = true
 	}
 }
 
 func (p *peer) writeAudioSamples() {
+	var previousPTS time.Duration
+	havePreviousPTS := false
 	for {
-		select {
-		case <-p.ctx.Done():
+		sample, ok := p.audioSamples.take(p.ctx)
+		if !ok {
 			return
-		case sample := <-p.audioSamples:
-			if _, err := p.audioTrack.WriteSample(sample.Data, sample.Duration); err != nil {
+		}
+		{
+			ptsRegressed := havePreviousPTS && sample.PTS <= previousPTS
+			timestampAdvance := time.Duration(0)
+			if havePreviousPTS {
+				if ptsRegressed {
+					timestampAdvance = positiveDiscontinuityDuration(sample.Duration, p.audioTrack.capability.ClockRate)
+				} else {
+					timestampAdvance = sample.PTS - previousPTS
+				}
+			}
+			if _, err := p.audioTrack.WriteSample(sample.Data, timestampAdvance); err != nil {
 				if p.ctx.Err() == nil {
 					p.logger.Debug("peer audio writer stopped", zap.Error(err))
 					go p.closeWith(websocket.CloseGoingAway, "audio transport stopped")
@@ -1094,6 +1239,8 @@ func (p *peer) writeAudioSamples() {
 				return
 			}
 			p.audioSamplesWritten.Add(1)
+			previousPTS = sample.PTS
+			havePreviousPTS = true
 		}
 	}
 }
