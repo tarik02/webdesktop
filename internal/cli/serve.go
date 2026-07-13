@@ -61,9 +61,10 @@ func newServeCommand() *cobra.Command {
 	flags.String("audio-device", defaults.Audio.Device, "PulseAudio monitor source")
 	flags.Int("audio-bitrate-kbps", defaults.Audio.BitrateKbps, "Opus audio bitrate in Kbit/s")
 	flags.Bool("input-enabled", defaults.Input.Enabled, "request remote pointer and keyboard input")
+	flags.Bool("input-locking", defaults.Input.Locking, "allow only one peer to control input")
 	flags.Bool("input-pointer", defaults.Input.Pointer, "enable remote pointer input")
 	flags.Bool("input-keyboard", defaults.Input.Keyboard, "enable remote keyboard input")
-	flags.Int("input-queue-size", defaults.Input.QueueSize, "bounded remote input event queue size")
+	flags.Int("input-queue-size", defaults.Input.QueueSize, "bounded remote input event queue size per peer")
 	flags.Bool("clipboard-enabled", defaults.Clipboard.Enabled, "synchronize the desktop clipboard")
 	flags.String("webrtc-signaling-path", defaults.WebRTC.SignalingPath, "WebSocket signaling path")
 	flags.Int("webrtc-max-peers", defaults.WebRTC.MaxPeers, "maximum concurrent WebRTC peers")
@@ -105,6 +106,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("audio.device", defaults.Audio.Device)
 	v.SetDefault("audio.bitrate_kbps", defaults.Audio.BitrateKbps)
 	v.SetDefault("input.enabled", defaults.Input.Enabled)
+	v.SetDefault("input.locking", defaults.Input.Locking)
 	v.SetDefault("input.pointer", defaults.Input.Pointer)
 	v.SetDefault("input.keyboard", defaults.Input.Keyboard)
 	v.SetDefault("input.queue_size", defaults.Input.QueueSize)
@@ -138,6 +140,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"audio.device",
 		"audio.bitrate_kbps",
 		"input.enabled",
+		"input.locking",
 		"input.pointer",
 		"input.keyboard",
 		"input.queue_size",
@@ -176,6 +179,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"audio-device":            "audio.device",
 		"audio-bitrate-kbps":      "audio.bitrate_kbps",
 		"input-enabled":           "input.enabled",
+		"input-locking":           "input.locking",
 		"input-pointer":           "input.pointer",
 		"input-keyboard":          "input.keyboard",
 		"input-queue-size":        "input.queue_size",

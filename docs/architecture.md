@@ -18,8 +18,9 @@ Pointer and keyboard events travel in the other direction through a WebRTC data
 channel, the portal's `ConnectToEIS` file descriptor, and libei.
 
 Clipboard content uses a separate reliable data channel and the Clipboard portal
-attached to the same RemoteDesktop session. The input lease also gates clipboard
-access, so only the active controller receives or replaces clipboard content.
+attached to the same RemoteDesktop session. An active input session gates
+clipboard access. Optional input locking limits control and clipboard access to
+one peer.
 
 ## Video capture
 

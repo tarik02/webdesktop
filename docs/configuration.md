@@ -123,12 +123,14 @@ command.
 | Setting | Default | Notes |
 | --- | --- | --- |
 | `input.enabled` | `true` | Requests portal RemoteDesktop access |
+| `input.locking` | `false` | Restricts input and clipboard control to one peer |
 | `input.pointer` | `true` | Enables pointer events |
 | `input.keyboard` | `true` | Enables keyboard events |
-| `input.queue_size` | `256` | 16 through 4096 |
+| `input.queue_size` | `256` | Events per peer, 16 through 4096 |
 
-At least one input class must be enabled when input is active. Only one peer
-can hold the input lease.
+At least one input class must be enabled when input is active. Peers control
+input independently by default. Set `input.locking: true` or pass
+`--input-locking` to allow only one peer at a time.
 
 ## Clipboard
 
@@ -138,8 +140,9 @@ can hold the input lease.
 
 Clipboard access uses the Wayland Clipboard portal and requires `input.enabled` and
 `input.keyboard`.
-Only the peer holding the input lease receives desktop clipboard content or may
-replace it. Transfers are limited to 32 MiB.
+Each peer with an active input session receives desktop clipboard content and
+may replace it. With input locking enabled, this is limited to the peer holding
+the input lock. Transfers are limited to 32 MiB.
 
 ## WebRTC
 

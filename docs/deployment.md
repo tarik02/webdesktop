@@ -137,7 +137,8 @@ monitor source stops the shared desktop session.
 
 Webdesktop has no authentication or TLS. Keep the default
 `127.0.0.1:8080` listener unless another trusted layer protects the service.
-A peer with the input lease can control the active unlocked desktop.
+Peers with active input access can control the unlocked desktop. Enable
+`input.locking` to restrict control to one peer at a time.
 
 An SSH tunnel keeps the HTTP and signaling listener private:
 

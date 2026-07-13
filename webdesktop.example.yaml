@@ -191,6 +191,7 @@ audio:
 
 input:
   enabled: true
+  locking: false
   pointer: true
   keyboard: true
   queue_size: 256

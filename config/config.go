@@ -91,6 +91,7 @@ type Audio struct {
 // Input contains static remote input settings.
 type Input struct {
 	Enabled   bool `mapstructure:"enabled" yaml:"enabled"`
+	Locking   bool `mapstructure:"locking" yaml:"locking"`
 	Pointer   bool `mapstructure:"pointer" yaml:"pointer"`
 	Keyboard  bool `mapstructure:"keyboard" yaml:"keyboard"`
 	QueueSize int  `mapstructure:"queue_size" yaml:"queue_size"`
@@ -146,6 +147,7 @@ func Defaults() Config {
 		},
 		Input: Input{
 			Enabled:   true,
+			Locking:   false,
 			Pointer:   true,
 			Keyboard:  true,
 			QueueSize: 256,
