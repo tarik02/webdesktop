@@ -140,19 +140,24 @@ type InputAuthorization struct {
 
 // Session owns one portal session and its optional EIS remote.
 type Session struct {
-	conn             *dbus.Conn
-	path             dbus.ObjectPath
-	eisRemote        *os.File
-	stream           streamMetadata
-	input            InputAuthorization
-	clipboard        bool
-	restore          RestoreStatus
-	signals          chan *dbus.Signal
-	sessionMatch     []dbus.MatchOption
-	clipboardMatch   []dbus.MatchOption
-	clipboardChanges chan []string
-	clipboardMu      sync.RWMutex
-	clipboardContent clipboard.Content
+	conn                *dbus.Conn
+	path                dbus.ObjectPath
+	eisRemote           *os.File
+	stream              streamMetadata
+	input               InputAuthorization
+	clipboard           bool
+	restore             RestoreStatus
+	signals             chan *dbus.Signal
+	sessionMatch        []dbus.MatchOption
+	clipboardMatch      []dbus.MatchOption
+	clipboardChanges    chan clipboard.Selection
+	clipboardMu         sync.RWMutex
+	clipboardContent    clipboard.Content
+	clipboardGeneration uint64
+	clipboardWriteMu    sync.Mutex
+	transferCtx         context.Context
+	transferCancel      context.CancelFunc
+	transferWG          sync.WaitGroup
 
 	stop      chan struct{}
 	done      chan struct{}
@@ -587,11 +592,12 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		signals:          signals,
 		sessionMatch:     sessionMatch,
 		clipboardMatch:   clipboardMatch,
-		clipboardChanges: make(chan []string, 1),
+		clipboardChanges: make(chan clipboard.Selection, 1),
 		clipboard:        clipboardEnabled,
 		stop:             make(chan struct{}),
 		done:             make(chan struct{}),
 	}
+	session.transferCtx, session.transferCancel = context.WithCancel(context.Background())
 	go session.watch()
 
 	return session, nil
@@ -676,18 +682,35 @@ func (s *Session) InputAuthorization() InputAuthorization {
 }
 
 // Changes reports MIME types offered by a new desktop clipboard owner.
-func (s *Session) Changes() <-chan []string {
+func (s *Session) Changes() <-chan clipboard.Selection {
 	return s.clipboardChanges
 }
 
+func (s *Session) CurrentGeneration() uint64 {
+	s.clipboardMu.RLock()
+	defer s.clipboardMu.RUnlock()
+	return s.clipboardGeneration
+}
+
 // Read transfers one MIME representation from the desktop clipboard.
-func (s *Session) Read(ctx context.Context, mimeType string) ([]byte, error) {
+func (s *Session) Read(ctx context.Context, generation uint64, mimeType string) ([]byte, error) {
 	if !s.clipboard {
 		return nil, errors.New("portal session does not have clipboard access")
 	}
+	readCtx, release, ok := s.admit(ctx)
+	if !ok {
+		return nil, ErrSessionClosed
+	}
+	defer release()
+	s.clipboardMu.RLock()
+	current := s.clipboardGeneration
+	s.clipboardMu.RUnlock()
+	if current != generation {
+		return nil, errors.New("portal clipboard selection changed")
+	}
 	var selectionFD dbus.UnixFD
 	if err := s.conn.Object(portalDestination, portalPath).CallWithContext(
-		ctx,
+		readCtx,
 		clipboardInterface+".SelectionRead",
 		0,
 		s.path,
@@ -703,7 +726,7 @@ func (s *Session) Read(ctx context.Context, mimeType string) ([]byte, error) {
 		_ = unix.Close(int(selectionFD))
 		return nil, fmt.Errorf("open portal clipboard file descriptor %d", selectionFD)
 	}
-	stopCancel := context.AfterFunc(ctx, func() {
+	stopCancel := context.AfterFunc(readCtx, func() {
 		_ = file.Close()
 	})
 	defer func() {
@@ -727,6 +750,11 @@ func (s *Session) Write(ctx context.Context, content clipboard.Content) error {
 		return errors.New("portal session does not have clipboard access")
 	}
 	mimeTypes := make([]string, len(content.Formats))
+	writeCtx, release, ok := s.admit(ctx)
+	if !ok {
+		return ErrSessionClosed
+	}
+	defer release()
 	stored := clipboard.Content{Formats: make([]clipboard.Format, len(content.Formats))}
 	for index, format := range content.Formats {
 		mimeTypes[index] = format.MIME
@@ -736,11 +764,13 @@ func (s *Session) Write(ctx context.Context, content clipboard.Content) error {
 		}
 	}
 
-	s.clipboardMu.Lock()
-	s.clipboardContent = stored
-	s.clipboardMu.Unlock()
+	s.clipboardWriteMu.Lock()
+	defer s.clipboardWriteMu.Unlock()
+	s.clipboardMu.RLock()
+	baseGeneration := s.clipboardGeneration
+	s.clipboardMu.RUnlock()
 	if err := s.conn.Object(portalDestination, portalPath).CallWithContext(
-		ctx,
+		writeCtx,
 		clipboardInterface+".SetSelection",
 		0,
 		s.path,
@@ -748,6 +778,12 @@ func (s *Session) Write(ctx context.Context, content clipboard.Content) error {
 	).Err; err != nil {
 		return fmt.Errorf("set portal clipboard selection: %w", err)
 	}
+	s.clipboardMu.Lock()
+	if s.clipboardGeneration == baseGeneration {
+		s.clipboardGeneration++
+		s.clipboardContent = stored
+	}
+	s.clipboardMu.Unlock()
 	return nil
 }
 
@@ -804,20 +840,25 @@ func (s *Session) watch() {
 				if sessionIsOwner {
 					continue
 				}
+				s.clipboardMu.Lock()
+				s.clipboardGeneration++
+				generation := s.clipboardGeneration
+				s.clipboardMu.Unlock()
 				var mimeTypes []string
 				if offered, ok := options["mime_types"]; ok {
 					if err := dbus.Store([]any{offered}, &mimeTypes); err != nil {
 						continue
 					}
 				}
+				selection := clipboard.Selection{Generation: generation, MIMETypes: append([]string(nil), mimeTypes...)}
 				select {
-				case s.clipboardChanges <- mimeTypes:
+				case s.clipboardChanges <- selection:
 				default:
 					select {
 					case <-s.clipboardChanges:
 					default:
 					}
-					s.clipboardChanges <- mimeTypes
+					s.clipboardChanges <- selection
 				}
 			case selectionTransferSignal:
 				var sessionPath dbus.ObjectPath
@@ -826,27 +867,37 @@ func (s *Session) watch() {
 				if err := dbus.Store(signal.Body, &sessionPath, &mimeType, &serial); err != nil || sessionPath != s.path {
 					continue
 				}
-				go s.writeSelection(mimeType, serial)
+				s.clipboardWriteMu.Lock()
+				s.clipboardMu.RLock()
+				payload := cloneClipboardContent(s.clipboardContent)
+				s.clipboardMu.RUnlock()
+				s.clipboardWriteMu.Unlock()
+				transferCtx, release, ok := s.admit(context.Background())
+				if !ok {
+					continue
+				}
+				go func() {
+					defer release()
+					s.writeSelection(transferCtx, mimeType, serial, payload)
+				}()
 			}
 		}
 	}
 }
 
-func (s *Session) writeSelection(mimeType string, serial uint32) {
-	s.clipboardMu.RLock()
+func (s *Session) writeSelection(ctx context.Context, mimeType string, serial uint32, content clipboard.Content) {
 	var data []byte
 	found := false
-	for _, format := range s.clipboardContent.Formats {
+	for _, format := range content.Formats {
 		if format.MIME == mimeType {
 			data = append([]byte(nil), format.Data...)
 			found = true
 			break
 		}
 	}
-	s.clipboardMu.RUnlock()
 
 	success := false
-	ctx, cancel := context.WithTimeout(context.Background(), portalCallTimeout)
+	ctx, cancel := context.WithTimeout(ctx, portalCallTimeout)
 	defer cancel()
 	if found {
 		var selectionFD dbus.UnixFD
@@ -884,7 +935,7 @@ func (s *Session) writeSelection(mimeType string, serial uint32) {
 			}
 		}
 	}
-	doneCtx, doneCancel := context.WithTimeout(context.Background(), portalCleanupTimeout)
+	doneCtx, doneCancel := context.WithTimeout(s.transferCtx, portalCleanupTimeout)
 	defer doneCancel()
 	_ = s.conn.Object(portalDestination, portalPath).CallWithContext(
 		doneCtx,
@@ -896,6 +947,26 @@ func (s *Session) writeSelection(mimeType string, serial uint32) {
 	).Err
 }
 
+func (s *Session) admit(parent context.Context) (context.Context, func(), bool) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.closing {
+		return nil, nil, false
+	}
+	s.transferWG.Add(1)
+	ctx, cancel := context.WithCancel(s.transferCtx)
+	stop := context.AfterFunc(parent, cancel)
+	return ctx, func() { stop(); cancel(); s.transferWG.Done() }, true
+}
+
+func cloneClipboardContent(content clipboard.Content) clipboard.Content {
+	copy := clipboard.Content{Formats: make([]clipboard.Format, len(content.Formats))}
+	for index, format := range content.Formats {
+		copy.Formats[index] = clipboard.Format{MIME: format.MIME, Data: append([]byte(nil), format.Data...)}
+	}
+	return copy
+}
+
 func (s *Session) finish(closePortal bool, cause error) {
 	s.closeOnce.Do(func() {
 		s.stateMu.Lock()
@@ -904,6 +975,7 @@ func (s *Session) finish(closePortal bool, cause error) {
 		s.stateMu.Unlock()
 
 		close(s.stop)
+		s.transferCancel()
 
 		var cleanupErr error
 		if closePortal {
@@ -920,6 +992,7 @@ func (s *Session) finish(closePortal bool, cause error) {
 			cleanupErr = errors.Join(cleanupErr, s.conn.RemoveMatchSignalContext(cleanupCtx, s.clipboardMatch...))
 		}
 
+		s.transferWG.Wait()
 		s.conn.RemoveSignal(s.signals)
 		cleanupErr = errors.Join(cleanupErr, s.conn.Close())
 

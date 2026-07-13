@@ -183,12 +183,8 @@ type peer struct {
 	inputMu                  sync.Mutex
 	input                    *pion.DataChannel
 	clipboardMu              sync.Mutex
-	clipboard                *pion.DataChannel
-	clipboardReceive         *clipboardReceive
+	clipboardState           *clipboardChannelState
 	clipboardSequence        uint64
-	clipboardBufferedLow     chan struct{}
-	clipboardClosed          chan struct{}
-	clipboardCloseOnce       sync.Once
 	inputSequence            uint64
 	inputSequenceSet         bool
 

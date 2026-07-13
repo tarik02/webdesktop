@@ -32,9 +32,15 @@ type Content struct {
 }
 
 // Backend provides clipboard access for one authorized desktop session.
+type Selection struct {
+	Generation uint64
+	MIMETypes  []string
+}
+
 type Backend interface {
-	Changes() <-chan []string
-	Read(context.Context, string) ([]byte, error)
+	Changes() <-chan Selection
+	CurrentGeneration() uint64
+	Read(context.Context, uint64, string) ([]byte, error)
 	Write(context.Context, Content) error
 }
 
@@ -77,6 +83,7 @@ func (c *Controller) Attach(ctx context.Context, backend Backend) error {
 		return errors.New("clipboard controller already has a backend")
 	}
 	c.backend = backend
+	c.latest = nil
 	c.mu.Unlock()
 
 	go c.run(ctx, backend)
@@ -108,6 +115,10 @@ func (c *Controller) Set(ctx context.Context, content Content) error {
 		return err
 	}
 	c.mu.Lock()
+	if c.backend != backend {
+		c.mu.Unlock()
+		return ErrNotReady
+	}
 	latest := clone(content)
 	c.latest = &latest
 	c.mu.Unlock()
@@ -156,6 +167,7 @@ func (c *Controller) run(ctx context.Context, backend Backend) {
 		c.mu.Lock()
 		if c.backend == backend {
 			c.backend = nil
+			c.latest = nil
 		}
 		c.mu.Unlock()
 	}()
@@ -164,15 +176,15 @@ func (c *Controller) run(ctx context.Context, backend Backend) {
 		select {
 		case <-ctx.Done():
 			return
-		case mimeTypes, ok := <-backend.Changes():
+		case selection, ok := <-backend.Changes():
 			if !ok {
 				return
 			}
 
-			formats := make([]Format, 0, len(mimeTypes))
+			formats := make([]Format, 0, len(selection.MIMETypes))
 			seen := make(map[string]struct{})
 			total := 0
-			for _, offered := range mimeTypes {
+			for _, offered := range selection.MIMETypes {
 				mimeType := NormalizeMIME(offered)
 				if mimeType == "" {
 					continue
@@ -181,7 +193,7 @@ func (c *Controller) run(ctx context.Context, backend Backend) {
 					continue
 				}
 				readCtx, cancel := context.WithTimeout(ctx, readTimeout)
-				data, err := backend.Read(readCtx, offered)
+				data, err := backend.Read(readCtx, selection.Generation, offered)
 				cancel()
 				if err != nil {
 					continue
@@ -192,6 +204,9 @@ func (c *Controller) run(ctx context.Context, backend Backend) {
 				total += len(data)
 				seen[mimeType] = struct{}{}
 				formats = append(formats, Format{MIME: mimeType, Data: data})
+			}
+			if backend.CurrentGeneration() != selection.Generation {
+				continue
 			}
 			if len(formats) == 0 {
 				continue
