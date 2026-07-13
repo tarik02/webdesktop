@@ -50,6 +50,7 @@ func New(cfg config.Config) (*App, error) {
 	}
 	inputController, err := remoteinput.New(remoteinput.Config{
 		Enabled:   cfg.Input.Enabled,
+		Locking:   cfg.Input.Locking,
 		Pointer:   cfg.Input.Pointer,
 		Keyboard:  cfg.Input.Keyboard,
 		QueueSize: cfg.Input.QueueSize,

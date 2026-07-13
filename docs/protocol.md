@@ -159,9 +159,10 @@ Quality is global because all peers share one encoder. A profile change rebuilds
 the encoder. If the new profile has different codec metadata, the server closes
 peers using the old codec and the client starts a new SDP exchange.
 
-### Input lease
+### Input access
 
-Only one peer can own input.
+Peers acquire input independently by default. When the server enables input
+locking, only one peer can hold input access at a time.
 
 Acquire:
 
@@ -198,12 +199,13 @@ Release:
 }
 ```
 
-The result type is `input.release.result`. Another peer receives `input_busy`.
-Other acquisition errors include `input_disabled`, `input_not_ready`,
-`input_channel_required`, and unauthorized pointer or keyboard classes.
+The result type is `input.release.result`. With input locking enabled, another
+peer receives `input_busy`. Other acquisition errors include `input_disabled`,
+`input_not_ready`, `input_channel_required`, and unauthorized pointer or
+keyboard classes.
 
 Closing either data channel, closing the peer, portal shutdown, overload, or
-service shutdown releases the lease and any held keys or buttons.
+service shutdown releases that peer's input access and any held keys or buttons.
 
 ## Input channel
 
@@ -299,8 +301,8 @@ Successful input events have no response. Errors include the decoded sequence:
 
 The input worker coalesces adjacent motion and continuous scroll events when
 ordering remains intact. It never drops key, button, or scroll-stop
-transitions. An overload returns `input_overloaded`, releases held state, and
-closes the input channel.
+transitions. An overload returns `input_overloaded`, releases that peer's held
+state, and closes the input channel.
 
 ## Validation
 
@@ -312,7 +314,8 @@ messages, and unordered or partial-reliable data channels.
 ## Clipboard channel
 
 The clipboard channel alternates JSON text headers and binary payload chunks.
-Only the peer holding the input lease may receive or replace clipboard content.
+Each peer with active input access may receive or replace clipboard content.
+Input locking restricts clipboard access to the peer holding the lock.
 One transfer may contain up to eight formats and 32 MiB in total.
 
 Supported MIME types are `text/plain`, `text/html`, `image/png`, `image/jpeg`,

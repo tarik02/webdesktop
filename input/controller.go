@@ -1,4 +1,4 @@
-// Package input serializes remote input and owns the exclusive control lease.
+// Package input serializes remote input and owns control leases.
 package input
 
 import (
@@ -25,6 +25,7 @@ var (
 // Config contains the implemented static input settings.
 type Config struct {
 	Enabled   bool
+	Locking   bool
 	Pointer   bool
 	Keyboard  bool
 	QueueSize int
@@ -36,7 +37,7 @@ type Authorization struct {
 	Keyboard bool
 }
 
-// Capabilities reports the input classes available to a lease holder.
+// Capabilities reports the input classes available to an input session.
 type Capabilities struct {
 	Pointer  bool
 	Keyboard bool
@@ -76,7 +77,21 @@ type queuedEvent struct {
 	event      Event
 }
 
-// Controller owns one optional libei sender and one peer lease.
+type ownerState struct {
+	generation     uint64
+	revoke         func(uint64, error)
+	queued         int
+	pressedKeys    map[uint32]struct{}
+	pressedButtons map[uint32]struct{}
+}
+
+type revocation struct {
+	revoke   func(uint64, error)
+	sequence uint64
+	cause    error
+}
+
+// Controller owns one optional libei sender and its peer leases.
 type Controller struct {
 	cfg Config
 
@@ -84,11 +99,10 @@ type Controller struct {
 	authorization  Authorization
 	sender         *eis.Sender
 	setupErr       error
-	owner          uint64
 	generation     uint64
-	revoke         func(uint64, error)
-	pressedKeys    map[uint32]struct{}
-	pressedButtons map[uint32]struct{}
+	owners         map[uint64]*ownerState
+	pressedKeys    map[uint32]uint64
+	pressedButtons map[uint32]uint64
 	closed         bool
 
 	queue []queuedEvent
@@ -104,8 +118,9 @@ func New(cfg Config) (*Controller, error) {
 	}
 	controller := &Controller{
 		cfg:            cfg,
-		pressedKeys:    make(map[uint32]struct{}),
-		pressedButtons: make(map[uint32]struct{}),
+		owners:         make(map[uint64]*ownerState),
+		pressedKeys:    make(map[uint32]uint64),
+		pressedButtons: make(map[uint32]uint64),
 		queue:          make([]queuedEvent, 0, cfg.QueueSize),
 		wake:           make(chan struct{}, 1),
 		stop:           make(chan struct{}),
@@ -149,7 +164,7 @@ func (c *Controller) SetUnavailable(authorization Authorization, err error) {
 	c.setupErr = err
 }
 
-// Acquire grants input to owner if the configured portal and EIS state is ready.
+// Acquire grants input access if the configured portal and EIS state is ready.
 func (c *Controller) Acquire(owner uint64, revoke func(uint64, error)) (Capabilities, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -166,11 +181,12 @@ func (c *Controller) Acquire(owner uint64, revoke func(uint64, error)) (Capabili
 	if c.cfg.Keyboard && !c.authorization.Keyboard {
 		return Capabilities{}, ErrKeyboardUnauthorized
 	}
-	if c.owner != 0 && c.owner != owner {
-		return Capabilities{}, ErrBusy
-	}
-	if c.owner == owner {
+	if state, ok := c.owners[owner]; ok {
+		state.revoke = revoke
 		return Capabilities{Pointer: c.cfg.Pointer, Keyboard: c.cfg.Keyboard}, nil
+	}
+	if c.cfg.Locking && len(c.owners) != 0 {
+		return Capabilities{}, ErrBusy
 	}
 	if c.sender == nil {
 		if c.setupErr != nil {
@@ -188,29 +204,33 @@ func (c *Controller) Acquire(owner uint64, revoke func(uint64, error)) (Capabili
 		return Capabilities{}, ErrNotReady
 	}
 
-	c.owner = owner
 	c.generation++
-	c.revoke = revoke
-	clear(c.pressedKeys)
-	clear(c.pressedButtons)
+	c.owners[owner] = &ownerState{
+		generation:     c.generation,
+		revoke:         revoke,
+		pressedKeys:    make(map[uint32]struct{}),
+		pressedButtons: make(map[uint32]struct{}),
+	}
 	return Capabilities{Pointer: c.cfg.Pointer, Keyboard: c.cfg.Keyboard}, nil
 }
 
-// Owns reports whether owner currently holds the input lease.
+// Owns reports whether owner has active input access.
 func (c *Controller) Owns(owner uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.owner == owner
+	_, ok := c.owners[owner]
+	return ok
 }
 
-// Submit queues one event for the active lease.
+// Submit queues one event for the owner's active input session.
 func (c *Controller) Submit(owner uint64, event Event) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return ErrClosed
 	}
-	if c.owner != owner {
+	state, ok := c.owners[owner]
+	if !ok {
 		c.mu.Unlock()
 		return ErrNotOwner
 	}
@@ -232,7 +252,7 @@ func (c *Controller) Submit(owner uint64, event Event) error {
 
 	queued := queuedEvent{
 		owner:      owner,
-		generation: c.generation,
+		generation: state.generation,
 		event:      event,
 	}
 	if len(c.queue) > 0 {
@@ -271,8 +291,9 @@ func (c *Controller) Submit(owner uint64, event Event) error {
 			}
 		}
 	}
-	if len(c.queue) < c.cfg.QueueSize {
+	if state.queued < c.cfg.QueueSize {
 		c.queue = append(c.queue, queued)
+		state.queued++
 		select {
 		case c.wake <- struct{}{}:
 		default:
@@ -280,32 +301,30 @@ func (c *Controller) Submit(owner uint64, event Event) error {
 		c.mu.Unlock()
 		return nil
 	}
-	revoke := c.revokeLocked(ErrOverloaded)
+	revoke := c.revokeOwnerLocked(owner, event.Sequence, ErrOverloaded)
 	c.mu.Unlock()
-	if revoke != nil {
-		revoke(event.Sequence, ErrOverloaded)
-	}
+	callRevocation(revoke)
 	return ErrOverloaded
 }
 
-// Release releases held state and drops owner's lease.
+// Release releases held state and drops the owner's input session.
 func (c *Controller) Release(owner uint64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.owner != owner {
+	if _, ok := c.owners[owner]; !ok {
 		return ErrNotOwner
 	}
-	c.revokeLocked(nil)
+	c.revokeOwnerLocked(owner, 0, nil)
 	return nil
 }
 
-// Revoke drops any lease and reports cause to its owner.
+// Revoke drops all input sessions and reports the cause to their owners.
 func (c *Controller) Revoke(cause error) {
 	c.mu.Lock()
-	revoke := c.revokeLocked(cause)
+	revocations := c.revokeAllLocked(cause)
 	c.mu.Unlock()
-	if revoke != nil {
-		revoke(0, cause)
+	for _, revoke := range revocations {
+		callRevocation(revoke)
 	}
 }
 
@@ -321,7 +340,7 @@ func (c *Controller) Close() error {
 		return nil
 	}
 	c.closed = true
-	c.revokeLocked(nil)
+	c.revokeAllLocked(nil)
 	sender := c.sender
 	close(c.stop)
 	c.mu.Unlock()
@@ -348,6 +367,9 @@ func (c *Controller) run() {
 				}
 				queued := c.queue[0]
 				c.queue = c.queue[1:]
+				if state, ok := c.owners[queued.owner]; ok && state.generation == queued.generation {
+					state.queued--
+				}
 				c.mu.Unlock()
 				c.handleEvent(queued)
 			}
@@ -357,7 +379,8 @@ func (c *Controller) run() {
 
 func (c *Controller) handleEvent(queued queuedEvent) {
 	c.mu.Lock()
-	if c.closed || c.owner != queued.owner || c.generation != queued.generation || c.sender == nil {
+	state, ok := c.owners[queued.owner]
+	if c.closed || !ok || state.generation != queued.generation || c.sender == nil {
 		c.mu.Unlock()
 		return
 	}
@@ -369,17 +392,31 @@ func (c *Controller) handleEvent(queued queuedEvent) {
 	case EventPointerRelative:
 		err = c.sender.PointerRelative(queued.event.DX, queued.event.DY)
 	case EventPointerButton:
-		_, pressed := c.pressedButtons[queued.event.ButtonCode]
+		_, pressed := state.pressedButtons[queued.event.ButtonCode]
 		if pressed == queued.event.Pressed {
 			c.mu.Unlock()
 			return
 		}
-		err = c.sender.Button(queued.event.ButtonCode, queued.event.Pressed)
-		if err == nil {
-			if queued.event.Pressed {
-				c.pressedButtons[queued.event.ButtonCode] = struct{}{}
-			} else {
-				delete(c.pressedButtons, queued.event.ButtonCode)
+		count := c.pressedButtons[queued.event.ButtonCode]
+		if queued.event.Pressed {
+			if count == 0 {
+				err = c.sender.Button(queued.event.ButtonCode, true)
+			}
+			if err == nil {
+				state.pressedButtons[queued.event.ButtonCode] = struct{}{}
+				c.pressedButtons[queued.event.ButtonCode] = count + 1
+			}
+		} else {
+			if count == 1 {
+				err = c.sender.Button(queued.event.ButtonCode, false)
+			}
+			if err == nil {
+				delete(state.pressedButtons, queued.event.ButtonCode)
+				if count == 1 {
+					delete(c.pressedButtons, queued.event.ButtonCode)
+				} else {
+					c.pressedButtons[queued.event.ButtonCode] = count - 1
+				}
 			}
 		}
 	case EventPointerScroll:
@@ -390,17 +427,31 @@ func (c *Controller) handleEvent(queued queuedEvent) {
 			queued.event.StopVertical,
 		)
 	case EventKeyboardKey:
-		_, pressed := c.pressedKeys[queued.event.Keycode]
+		_, pressed := state.pressedKeys[queued.event.Keycode]
 		if pressed == queued.event.Pressed {
 			c.mu.Unlock()
 			return
 		}
-		err = c.sender.KeyboardKey(queued.event.Keycode, queued.event.Pressed)
-		if err == nil {
-			if queued.event.Pressed {
-				c.pressedKeys[queued.event.Keycode] = struct{}{}
-			} else {
-				delete(c.pressedKeys, queued.event.Keycode)
+		count := c.pressedKeys[queued.event.Keycode]
+		if queued.event.Pressed {
+			if count == 0 {
+				err = c.sender.KeyboardKey(queued.event.Keycode, true)
+			}
+			if err == nil {
+				state.pressedKeys[queued.event.Keycode] = struct{}{}
+				c.pressedKeys[queued.event.Keycode] = count + 1
+			}
+		} else {
+			if count == 1 {
+				err = c.sender.KeyboardKey(queued.event.Keycode, false)
+			}
+			if err == nil {
+				delete(state.pressedKeys, queued.event.Keycode)
+				if count == 1 {
+					delete(c.pressedKeys, queued.event.Keycode)
+				} else {
+					c.pressedKeys[queued.event.Keycode] = count - 1
+				}
 			}
 		}
 	}
@@ -408,10 +459,14 @@ func (c *Controller) handleEvent(queued queuedEvent) {
 		c.mu.Unlock()
 		return
 	}
-	revoke := c.revokeLocked(err)
+	revocations := make([]*revocation, 0, len(c.owners))
+	if revoke := c.revokeOwnerLocked(queued.owner, queued.event.Sequence, err); revoke != nil {
+		revocations = append(revocations, revoke)
+	}
+	revocations = append(revocations, c.revokeAllLocked(err)...)
 	c.mu.Unlock()
-	if revoke != nil {
-		revoke(queued.event.Sequence, err)
+	for _, revoke := range revocations {
+		callRevocation(revoke)
 	}
 }
 
@@ -439,42 +494,80 @@ func (c *Controller) watchSender(sender *eis.Sender) {
 	}
 }
 
-func (c *Controller) revokeLocked(cause error) func(uint64, error) {
-	if c.owner == 0 {
+func (c *Controller) revokeOwnerLocked(owner, sequence uint64, cause error) *revocation {
+	state, ok := c.owners[owner]
+	if !ok {
 		return nil
 	}
-	c.releaseHeldLocked()
-	c.owner = 0
-	c.generation++
-	c.queue = c.queue[:0]
-	revoke := c.revoke
-	c.revoke = nil
-	if cause == nil {
+	c.releaseHeldLocked(state)
+	delete(c.owners, owner)
+	queue := c.queue[:0]
+	for _, queued := range c.queue {
+		if queued.owner != owner {
+			queue = append(queue, queued)
+		}
+	}
+	c.queue = queue
+	if cause == nil || state.revoke == nil {
 		return nil
 	}
-	return revoke
+	return &revocation{revoke: state.revoke, sequence: sequence, cause: cause}
 }
 
-func (c *Controller) releaseHeldLocked() {
-	if c.sender != nil {
-		keys := make([]uint32, 0, len(c.pressedKeys))
-		for keycode := range c.pressedKeys {
-			keys = append(keys, keycode)
-		}
-		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-		for _, keycode := range keys {
-			_ = c.sender.KeyboardKey(keycode, false)
-		}
+func (c *Controller) revokeAllLocked(cause error) []*revocation {
+	owners := make([]uint64, 0, len(c.owners))
+	for owner := range c.owners {
+		owners = append(owners, owner)
+	}
+	sort.Slice(owners, func(i, j int) bool { return owners[i] < owners[j] })
 
-		buttons := make([]uint32, 0, len(c.pressedButtons))
-		for code := range c.pressedButtons {
-			buttons = append(buttons, code)
-		}
-		sort.Slice(buttons, func(i, j int) bool { return buttons[i] < buttons[j] })
-		for _, code := range buttons {
-			_ = c.sender.Button(code, false)
+	revocations := make([]*revocation, 0, len(owners))
+	for _, owner := range owners {
+		if revoke := c.revokeOwnerLocked(owner, 0, cause); revoke != nil {
+			revocations = append(revocations, revoke)
 		}
 	}
-	clear(c.pressedKeys)
-	clear(c.pressedButtons)
+	return revocations
+}
+
+func (c *Controller) releaseHeldLocked(state *ownerState) {
+	keys := make([]uint32, 0, len(state.pressedKeys))
+	for keycode := range state.pressedKeys {
+		keys = append(keys, keycode)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	for _, keycode := range keys {
+		count := c.pressedKeys[keycode]
+		if count == 1 {
+			if c.sender != nil {
+				_ = c.sender.KeyboardKey(keycode, false)
+			}
+			delete(c.pressedKeys, keycode)
+		} else {
+			c.pressedKeys[keycode] = count - 1
+		}
+	}
+
+	buttons := make([]uint32, 0, len(state.pressedButtons))
+	for code := range state.pressedButtons {
+		buttons = append(buttons, code)
+	}
+	sort.Slice(buttons, func(i, j int) bool { return buttons[i] < buttons[j] })
+	for _, code := range buttons {
+		count := c.pressedButtons[code]
+		if count == 1 {
+			if c.sender != nil {
+				_ = c.sender.Button(code, false)
+			}
+			delete(c.pressedButtons, code)
+		} else {
+			c.pressedButtons[code] = count - 1
+		}
+	}
+}
+
+func callRevocation(revoke *revocation) {
+	if revoke != nil {
+		revoke.revoke(revoke.sequence, revoke.cause)
+	}
 }
