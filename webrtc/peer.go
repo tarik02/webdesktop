@@ -56,9 +56,10 @@ type peer struct {
 	connected          atomic.Bool
 	videoNeedsKeyframe atomic.Bool
 
-	signalWriteMu  sync.Mutex
-	controlWriteMu sync.Mutex
-	inputWriteMu   sync.Mutex
+	signalWriteMu    sync.Mutex
+	controlWriteMu   sync.Mutex
+	inputWriteMu     sync.Mutex
+	clipboardWriteMu sync.Mutex
 
 	offerHandled             bool
 	remoteDescriptionSet     bool
@@ -71,6 +72,13 @@ type peer struct {
 	control                  *pion.DataChannel
 	inputMu                  sync.Mutex
 	input                    *pion.DataChannel
+	clipboardMu              sync.Mutex
+	clipboard                *pion.DataChannel
+	clipboardReceive         *clipboardReceive
+	clipboardSequence        uint64
+	clipboardBufferedLow     chan struct{}
+	clipboardClosed          chan struct{}
+	clipboardCloseOnce       sync.Once
 	inputSequence            uint64
 	inputSequenceSet         bool
 
@@ -701,6 +709,12 @@ func (p *peer) onDataChannel(channel *pion.DataChannel) {
 		p.setControlChannel(channel)
 	case "input":
 		p.setInputChannel(channel)
+	case "clipboard":
+		if p.service.clipboard.Enabled() {
+			p.setClipboardChannel(channel)
+		} else {
+			_ = channel.Close()
+		}
 	default:
 		p.logger.Info("rejecting unsupported data channel", zap.String("label", channel.Label()))
 		_ = channel.Close()
@@ -827,6 +841,10 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 			},
 		}) {
 			go p.Close()
+			return
+		}
+		if p.service.clipboard.Enabled() {
+			go p.sendLatestClipboard()
 		}
 		return
 	case controlTypeInputRelease:

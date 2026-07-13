@@ -17,6 +17,10 @@ xdg-desktop-portal
 Pointer and keyboard events travel in the other direction through a WebRTC data
 channel, the portal's `ConnectToEIS` file descriptor, and libei.
 
+Clipboard content uses a separate reliable data channel and the Clipboard portal
+attached to the same RemoteDesktop session. The input lease also gates clipboard
+access, so only the active controller receives or replaces clipboard content.
+
 ## Video capture
 
 The portal PipeWire connection stays open for the service lifetime. Capture

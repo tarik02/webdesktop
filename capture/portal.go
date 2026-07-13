@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/tarik02/webdesktop/clipboard"
 	"golang.org/x/sys/unix"
 )
 
@@ -33,13 +34,16 @@ const (
 	portalPath             = dbus.ObjectPath("/org/freedesktop/portal/desktop")
 	screenCastInterface    = "org.freedesktop.portal.ScreenCast"
 	remoteDesktopInterface = "org.freedesktop.portal.RemoteDesktop"
+	clipboardInterface     = "org.freedesktop.portal.Clipboard"
 	requestInterface       = "org.freedesktop.portal.Request"
 	sessionInterface       = "org.freedesktop.portal.Session"
 	propertiesInterface    = "org.freedesktop.DBus.Properties"
 	registryInterface      = "org.freedesktop.host.portal.Registry"
 
-	requestResponseSignal = requestInterface + ".Response"
-	sessionClosedSignal   = sessionInterface + ".Closed"
+	requestResponseSignal   = requestInterface + ".Response"
+	sessionClosedSignal     = sessionInterface + ".Closed"
+	selectionChangedSignal  = clipboardInterface + ".SelectionOwnerChanged"
+	selectionTransferSignal = clipboardInterface + ".SelectionTransfer"
 
 	sourceTypeMonitor   uint32 = 1
 	cursorModeHidden    uint32 = 1
@@ -50,6 +54,7 @@ const (
 
 	portalCleanupTimeout = 2 * time.Second
 	portalCallTimeout    = 10 * time.Second
+	maxClipboardBytes    = 32 * 1024 * 1024
 	restoreStateVersion  = 1
 )
 
@@ -63,6 +68,7 @@ type Config struct {
 	Source     string
 	CursorMode string
 	Input      InputConfig
+	Clipboard  bool
 }
 
 // InputConfig controls whether the portal session also authorizes remote input.
@@ -87,6 +93,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Input.Enabled && !cfg.Input.Pointer && !cfg.Input.Keyboard {
 		errs = append(errs, errors.New("capture input requires pointer or keyboard"))
+	}
+	if cfg.Clipboard && (!cfg.Input.Enabled || !cfg.Input.Keyboard) {
+		errs = append(errs, errors.New("clipboard synchronization requires remote keyboard input"))
 	}
 
 	return errors.Join(errs...)
@@ -131,14 +140,19 @@ type InputAuthorization struct {
 
 // Session owns one portal session and its optional EIS remote.
 type Session struct {
-	conn         *dbus.Conn
-	path         dbus.ObjectPath
-	eisRemote    *os.File
-	stream       streamMetadata
-	input        InputAuthorization
-	restore      RestoreStatus
-	signals      chan *dbus.Signal
-	sessionMatch []dbus.MatchOption
+	conn             *dbus.Conn
+	path             dbus.ObjectPath
+	eisRemote        *os.File
+	stream           streamMetadata
+	input            InputAuthorization
+	clipboard        bool
+	restore          RestoreStatus
+	signals          chan *dbus.Signal
+	sessionMatch     []dbus.MatchOption
+	clipboardMatch   []dbus.MatchOption
+	clipboardChanges chan []string
+	clipboardMu      sync.RWMutex
+	clipboardContent clipboard.Content
 
 	stop      chan struct{}
 	done      chan struct{}
@@ -184,9 +198,14 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		dbus.WithMatchInterface(sessionInterface),
 		dbus.WithMatchMember("Closed"),
 	}
+	clipboardMatch := []dbus.MatchOption{
+		dbus.WithMatchSender(portalDestination),
+		dbus.WithMatchInterface(clipboardInterface),
+	}
 
 	requestMatchAdded := false
 	sessionMatchAdded := false
+	clipboardMatchAdded := false
 	var sessionPath dbus.ObjectPath
 	var eisRemote *os.File
 
@@ -211,6 +230,9 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		if sessionMatchAdded {
 			cleanupErr = errors.Join(cleanupErr, conn.RemoveMatchSignalContext(cleanupCtx, sessionMatch...))
 		}
+		if clipboardMatchAdded {
+			cleanupErr = errors.Join(cleanupErr, conn.RemoveMatchSignalContext(cleanupCtx, clipboardMatch...))
+		}
 
 		conn.RemoveSignal(signals)
 		cleanupErr = errors.Join(cleanupErr, conn.Close())
@@ -226,6 +248,12 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, fmt.Errorf("subscribe to portal session closure: %w", err)
 	}
 	sessionMatchAdded = true
+	if cfg.Clipboard {
+		if err = conn.AddMatchSignalContext(ctx, clipboardMatch...); err != nil {
+			return nil, fmt.Errorf("subscribe to portal clipboard signals: %w", err)
+		}
+		clipboardMatchAdded = true
+	}
 
 	client := portalClient{
 		conn:    conn,
@@ -398,6 +426,35 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 		); err != nil {
 			return nil, fmt.Errorf("select remote desktop devices: %w", err)
 		}
+
+		if cfg.Clipboard {
+			var clipboardVersionVariant dbus.Variant
+			if err := client.object.CallWithContext(
+				ctx,
+				propertiesInterface+".Get",
+				0,
+				clipboardInterface,
+				"version",
+			).Store(&clipboardVersionVariant); err != nil {
+				return nil, fmt.Errorf("read clipboard portal version: %w", err)
+			}
+			var clipboardVersion uint32
+			if err := dbus.Store([]any{clipboardVersionVariant}, &clipboardVersion); err != nil {
+				return nil, fmt.Errorf("decode clipboard portal version: %w", err)
+			}
+			if clipboardVersion < 1 {
+				return nil, fmt.Errorf("clipboard portal version %d is not supported", clipboardVersion)
+			}
+			if err := client.object.CallWithContext(
+				ctx,
+				clipboardInterface+".RequestClipboard",
+				0,
+				sessionPath,
+				map[string]dbus.Variant{},
+			).Err; err != nil {
+				return nil, fmt.Errorf("request portal clipboard access: %w", err)
+			}
+		}
 	}
 
 	startResults, err := client.request(
@@ -466,6 +523,19 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 			return nil, fmt.Errorf("decode authorized remote desktop devices: %w", err)
 		}
 	}
+	clipboardEnabled := false
+	if cfg.Clipboard {
+		clipboardVariant, ok := startResults["clipboard_enabled"]
+		if !ok {
+			return nil, errors.New("start remote desktop response did not contain clipboard_enabled")
+		}
+		if err := dbus.Store([]any{clipboardVariant}, &clipboardEnabled); err != nil {
+			return nil, fmt.Errorf("decode authorized clipboard state: %w", err)
+		}
+		if !clipboardEnabled {
+			return nil, errors.New("desktop portal did not authorize clipboard access")
+		}
+	}
 
 	if err := conn.RemoveMatchSignalContext(ctx, requestMatch...); err != nil {
 		return nil, fmt.Errorf("unsubscribe from portal request responses: %w", err)
@@ -514,10 +584,13 @@ func Open(ctx context.Context, cfg Config) (_ *Session, err error) {
 			TokenAttempted: tokenAttempted,
 			TokenRotated:   tokenRotated,
 		},
-		signals:      signals,
-		sessionMatch: sessionMatch,
-		stop:         make(chan struct{}),
-		done:         make(chan struct{}),
+		signals:          signals,
+		sessionMatch:     sessionMatch,
+		clipboardMatch:   clipboardMatch,
+		clipboardChanges: make(chan []string, 1),
+		clipboard:        clipboardEnabled,
+		stop:             make(chan struct{}),
+		done:             make(chan struct{}),
 	}
 	go session.watch()
 
@@ -602,6 +675,82 @@ func (s *Session) InputAuthorization() InputAuthorization {
 	return s.input
 }
 
+// Changes reports MIME types offered by a new desktop clipboard owner.
+func (s *Session) Changes() <-chan []string {
+	return s.clipboardChanges
+}
+
+// Read transfers one MIME representation from the desktop clipboard.
+func (s *Session) Read(ctx context.Context, mimeType string) ([]byte, error) {
+	if !s.clipboard {
+		return nil, errors.New("portal session does not have clipboard access")
+	}
+	var selectionFD dbus.UnixFD
+	if err := s.conn.Object(portalDestination, portalPath).CallWithContext(
+		ctx,
+		clipboardInterface+".SelectionRead",
+		0,
+		s.path,
+		mimeType,
+	).Store(&selectionFD); err != nil {
+		return nil, fmt.Errorf("read portal clipboard selection %q: %w", mimeType, err)
+	}
+	if selectionFD < 0 {
+		return nil, fmt.Errorf("portal returned invalid clipboard file descriptor %d", selectionFD)
+	}
+	file := os.NewFile(uintptr(selectionFD), "xdg-desktop-portal-clipboard-read")
+	if file == nil {
+		_ = unix.Close(int(selectionFD))
+		return nil, fmt.Errorf("open portal clipboard file descriptor %d", selectionFD)
+	}
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = file.Close()
+	})
+	defer func() {
+		stopCancel()
+		_ = file.Close()
+	}()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxClipboardBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("transfer portal clipboard selection %q: %w", mimeType, err)
+	}
+	if len(data) > maxClipboardBytes {
+		return nil, fmt.Errorf("portal clipboard selection %q exceeds %d bytes", mimeType, maxClipboardBytes)
+	}
+	return data, nil
+}
+
+// Write makes content supplied by a remote peer the desktop clipboard selection.
+func (s *Session) Write(ctx context.Context, content clipboard.Content) error {
+	if !s.clipboard {
+		return errors.New("portal session does not have clipboard access")
+	}
+	mimeTypes := make([]string, len(content.Formats))
+	stored := clipboard.Content{Formats: make([]clipboard.Format, len(content.Formats))}
+	for index, format := range content.Formats {
+		mimeTypes[index] = format.MIME
+		stored.Formats[index] = clipboard.Format{
+			MIME: format.MIME,
+			Data: append([]byte(nil), format.Data...),
+		}
+	}
+
+	s.clipboardMu.Lock()
+	s.clipboardContent = stored
+	s.clipboardMu.Unlock()
+	if err := s.conn.Object(portalDestination, portalPath).CallWithContext(
+		ctx,
+		clipboardInterface+".SetSelection",
+		0,
+		s.path,
+		map[string]dbus.Variant{"mime_types": dbus.MakeVariant(mimeTypes)},
+	).Err; err != nil {
+		return fmt.Errorf("set portal clipboard selection: %w", err)
+	}
+	return nil
+}
+
 // MappingID identifies the EIS absolute region paired with the captured stream.
 func (s *Session) MappingID() string {
 	return s.stream.mappingID
@@ -639,8 +788,112 @@ func (s *Session) watch() {
 				s.finish(false, ErrSessionClosed)
 				return
 			}
+			switch signal.Name {
+			case selectionChangedSignal:
+				var sessionPath dbus.ObjectPath
+				var options map[string]dbus.Variant
+				if err := dbus.Store(signal.Body, &sessionPath, &options); err != nil || sessionPath != s.path {
+					continue
+				}
+				var sessionIsOwner bool
+				if owner, ok := options["session_is_owner"]; ok {
+					if err := dbus.Store([]any{owner}, &sessionIsOwner); err != nil {
+						continue
+					}
+				}
+				if sessionIsOwner {
+					continue
+				}
+				var mimeTypes []string
+				if offered, ok := options["mime_types"]; ok {
+					if err := dbus.Store([]any{offered}, &mimeTypes); err != nil {
+						continue
+					}
+				}
+				select {
+				case s.clipboardChanges <- mimeTypes:
+				default:
+					select {
+					case <-s.clipboardChanges:
+					default:
+					}
+					s.clipboardChanges <- mimeTypes
+				}
+			case selectionTransferSignal:
+				var sessionPath dbus.ObjectPath
+				var mimeType string
+				var serial uint32
+				if err := dbus.Store(signal.Body, &sessionPath, &mimeType, &serial); err != nil || sessionPath != s.path {
+					continue
+				}
+				go s.writeSelection(mimeType, serial)
+			}
 		}
 	}
+}
+
+func (s *Session) writeSelection(mimeType string, serial uint32) {
+	s.clipboardMu.RLock()
+	var data []byte
+	found := false
+	for _, format := range s.clipboardContent.Formats {
+		if format.MIME == mimeType {
+			data = append([]byte(nil), format.Data...)
+			found = true
+			break
+		}
+	}
+	s.clipboardMu.RUnlock()
+
+	success := false
+	ctx, cancel := context.WithTimeout(context.Background(), portalCallTimeout)
+	defer cancel()
+	if found {
+		var selectionFD dbus.UnixFD
+		if err := s.conn.Object(portalDestination, portalPath).CallWithContext(
+			ctx,
+			clipboardInterface+".SelectionWrite",
+			0,
+			s.path,
+			serial,
+		).Store(&selectionFD); err == nil && selectionFD >= 0 {
+			file := os.NewFile(uintptr(selectionFD), "xdg-desktop-portal-clipboard-write")
+			if file == nil {
+				_ = unix.Close(int(selectionFD))
+			} else {
+				stopCancel := context.AfterFunc(ctx, func() {
+					_ = file.Close()
+				})
+				written := 0
+				var writeErr error
+				for written < len(data) {
+					var count int
+					count, writeErr = file.Write(data[written:])
+					written += count
+					if writeErr != nil {
+						break
+					}
+					if count == 0 {
+						writeErr = io.ErrShortWrite
+						break
+					}
+				}
+				stopCancel()
+				closeErr := file.Close()
+				success = written == len(data) && writeErr == nil && closeErr == nil
+			}
+		}
+	}
+	doneCtx, doneCancel := context.WithTimeout(context.Background(), portalCleanupTimeout)
+	defer doneCancel()
+	_ = s.conn.Object(portalDestination, portalPath).CallWithContext(
+		doneCtx,
+		clipboardInterface+".SelectionWriteDone",
+		0,
+		s.path,
+		serial,
+		success,
+	).Err
 }
 
 func (s *Session) finish(closePortal bool, cause error) {
@@ -663,6 +916,9 @@ func (s *Session) finish(closePortal bool, cause error) {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), portalCleanupTimeout)
 		defer cancel()
 		cleanupErr = errors.Join(cleanupErr, s.conn.RemoveMatchSignalContext(cleanupCtx, s.sessionMatch...))
+		if s.clipboard {
+			cleanupErr = errors.Join(cleanupErr, s.conn.RemoveMatchSignalContext(cleanupCtx, s.clipboardMatch...))
+		}
 
 		s.conn.RemoveSignal(s.signals)
 		cleanupErr = errors.Join(cleanupErr, s.conn.Close())
@@ -764,6 +1020,7 @@ type restoreState struct {
 	Source        string      `json:"source"`
 	ScreenShare   bool        `json:"screen_share"`
 	Input         InputConfig `json:"input"`
+	Clipboard     bool        `json:"clipboard"`
 	RestoreToken  string      `json:"restore_token"`
 }
 
@@ -814,6 +1071,7 @@ func loadRestoreToken(cfg Config) (string, string, bool, error) {
 		state.Source == cfg.Source &&
 		state.ScreenShare &&
 		state.Input == cfg.Input &&
+		state.Clipboard == cfg.Clipboard &&
 		state.RestoreToken != ""
 	if !matches {
 		if err := os.Remove(statePath); err != nil {
@@ -831,6 +1089,7 @@ func storeRestoreToken(statePath string, cfg Config, token string) error {
 		Source:        cfg.Source,
 		ScreenShare:   true,
 		Input:         cfg.Input,
+		Clipboard:     cfg.Clipboard,
 		RestoreToken:  token,
 	}
 	data, err := json.Marshal(state)

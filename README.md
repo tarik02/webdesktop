@@ -11,13 +11,14 @@ uses Pion for WebRTC. There is no X11 capture path or fallback.
 - Live bitrate, resolution, and frame-rate changes
 - Optional Opus desktop audio
 - Portal-authorized pointer and keyboard input through libei
+- Bidirectional rich clipboard synchronization through the Clipboard portal
 - Embedded browser client and WebSocket signaling
 - Persistent portal restore tokens for unattended service restarts
 
 ## Requirements
 
 - KDE Plasma on Wayland
-- xdg-desktop-portal with the KDE backend
+- xdg-desktop-portal with the KDE backend and Clipboard portal v1
 - PipeWire
 - GStreamer with the PipeWire, base, good, bad, and ugly plugins
 - libei

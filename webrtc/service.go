@@ -15,6 +15,7 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/stun/v3"
 	pion "github.com/pion/webrtc/v4"
+	"github.com/tarik02/webdesktop/clipboard"
 	remoteinput "github.com/tarik02/webdesktop/input"
 	"github.com/tarik02/webdesktop/media"
 	"go.uber.org/zap"
@@ -120,6 +121,7 @@ type Service struct {
 	source     Media
 	audio      AudioMedia
 	input      *remoteinput.Controller
+	clipboard  *clipboard.Controller
 	logger     *zap.Logger
 	audioCodec pion.RTPCodecCapability
 
@@ -146,6 +148,7 @@ func New(
 	source Media,
 	audio AudioMedia,
 	inputController *remoteinput.Controller,
+	clipboardController *clipboard.Controller,
 	logger *zap.Logger,
 ) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
@@ -162,6 +165,9 @@ func New(
 	}
 	if inputController == nil {
 		return nil, errors.New("WebRTC input controller is required")
+	}
+	if clipboardController == nil {
+		return nil, errors.New("WebRTC clipboard controller is required")
 	}
 	if logger == nil {
 		return nil, errors.New("WebRTC logger is required")
@@ -189,6 +195,7 @@ func New(
 		source:           source,
 		audio:            audio,
 		input:            inputController,
+		clipboard:        clipboardController,
 		logger:           logger,
 		audioCodec:       audioCodec,
 		ctx:              ctx,

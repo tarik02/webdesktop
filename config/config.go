@@ -32,13 +32,14 @@ const (
 
 // Config contains the resolved service configuration.
 type Config struct {
-	Server  Server  `mapstructure:"server" yaml:"server"`
-	Logging Logging `mapstructure:"logging" yaml:"logging"`
-	Tracing Tracing `mapstructure:"tracing" yaml:"tracing"`
-	Video   Video   `mapstructure:"video" yaml:"video"`
-	Audio   Audio   `mapstructure:"audio" yaml:"audio"`
-	Input   Input   `mapstructure:"input" yaml:"input"`
-	WebRTC  WebRTC  `mapstructure:"webrtc" yaml:"webrtc"`
+	Server    Server    `mapstructure:"server" yaml:"server"`
+	Logging   Logging   `mapstructure:"logging" yaml:"logging"`
+	Tracing   Tracing   `mapstructure:"tracing" yaml:"tracing"`
+	Video     Video     `mapstructure:"video" yaml:"video"`
+	Audio     Audio     `mapstructure:"audio" yaml:"audio"`
+	Input     Input     `mapstructure:"input" yaml:"input"`
+	Clipboard Clipboard `mapstructure:"clipboard" yaml:"clipboard"`
+	WebRTC    WebRTC    `mapstructure:"webrtc" yaml:"webrtc"`
 }
 
 // Server contains HTTP server settings.
@@ -92,6 +93,11 @@ type Input struct {
 	QueueSize int  `mapstructure:"queue_size" yaml:"queue_size"`
 }
 
+// Clipboard contains desktop clipboard synchronization settings.
+type Clipboard struct {
+	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
+}
+
 // WebRTC contains static peer transport and signaling settings.
 type WebRTC struct {
 	SignalingPath  string   `mapstructure:"signaling_path" yaml:"signaling_path"`
@@ -140,6 +146,7 @@ func Defaults() Config {
 			Keyboard:  true,
 			QueueSize: 256,
 		},
+		Clipboard: Clipboard{Enabled: true},
 		WebRTC: WebRTC{
 			SignalingPath:  "/webrtc",
 			MaxPeers:       2,
@@ -240,6 +247,9 @@ func (cfg Config) Validate() error {
 
 	if cfg.Input.Enabled && !cfg.Input.Pointer && !cfg.Input.Keyboard {
 		errs = append(errs, errors.New("input requires pointer or keyboard when enabled"))
+	}
+	if cfg.Clipboard.Enabled && (!cfg.Input.Enabled || !cfg.Input.Keyboard) {
+		errs = append(errs, errors.New("clipboard.enabled requires input.enabled and input.keyboard"))
 	}
 	if cfg.Input.QueueSize < 16 || cfg.Input.QueueSize > 4096 {
 		errs = append(errs, errors.New("input.queue_size must be between 16 and 4096"))

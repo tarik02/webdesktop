@@ -3,6 +3,17 @@ import { z } from "zod";
 export const minimumVideoBitrateKbps = 100;
 export const maximumVP8BitrateKbps = 2_147_483;
 export const maximumH264BitrateKbps = 50_000;
+export const maximumClipboardBytes = 32 * 1024 * 1024;
+
+export const clipboardMIMESchema = z.enum([
+  "text/plain",
+  "text/html",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/svg+xml",
+]);
 
 const protocolErrorSchema = z
   .object({
@@ -104,6 +115,11 @@ export const serverConfigSchema = z
         keyboard: z.boolean(),
       })
       .strict(),
+    clipboard: z
+      .object({
+        enabled: z.boolean(),
+      })
+      .strict(),
   })
   .strict();
 
@@ -183,6 +199,47 @@ export const controlResponseSchema = z.discriminatedUnion("type", [
     .strict(),
 ]);
 
+export const clipboardMessageSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      version: z.literal(1),
+      type: z.literal("clipboard.content"),
+      id: z.string(),
+      formats: z
+        .array(
+          z
+            .object({
+              mime_type: clipboardMIMESchema,
+              size: z.number().int().nonnegative().max(maximumClipboardBytes),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(8)
+        .refine(
+          (formats) =>
+            formats.reduce((total, format) => total + format.size, 0) <= maximumClipboardBytes,
+        ),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(1),
+      type: z.literal("clipboard.content.result"),
+      id: z.string(),
+      ok: z.literal(true),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(1),
+      type: z.literal("error"),
+      id: z.string(),
+      error: protocolErrorSchema,
+    })
+    .strict(),
+]);
+
 export const inputResponseSchema = z
   .object({
     version: z.literal(1),
@@ -197,6 +254,9 @@ export type ServerConfig = z.infer<typeof serverConfigSchema>;
 export type Quality = z.infer<typeof qualitySchema>;
 export type SignalResponse = z.infer<typeof signalResponseSchema>;
 export type ControlResponse = z.infer<typeof controlResponseSchema>;
+export type ClipboardMessage = z.infer<typeof clipboardMessageSchema>;
+export type ClipboardMIME = z.infer<typeof clipboardMIMESchema>;
+export type ClipboardFormat = { mimeType: ClipboardMIME; data: ArrayBuffer };
 export type ClientTraceLevel = "debug" | "info" | "warn" | "error";
 
 export type ClientLogMessage = {

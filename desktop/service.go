@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/tarik02/webdesktop/capture"
+	"github.com/tarik02/webdesktop/clipboard"
 	"github.com/tarik02/webdesktop/input"
 	"github.com/tarik02/webdesktop/input/eis"
 	"go.uber.org/zap"
@@ -20,11 +21,12 @@ type Media interface {
 
 // Service owns the portal session and coordinates its media and input users.
 type Service struct {
-	cfg    capture.Config
-	media  Media
-	input  *input.Controller
-	logger *zap.Logger
-	ready  chan struct{}
+	cfg       capture.Config
+	media     Media
+	input     *input.Controller
+	clipboard *clipboard.Controller
+	logger    *zap.Logger
+	ready     chan struct{}
 
 	readyOnce sync.Once
 }
@@ -34,6 +36,7 @@ func New(
 	cfg capture.Config,
 	mediaService Media,
 	inputController *input.Controller,
+	clipboardController *clipboard.Controller,
 	logger *zap.Logger,
 ) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
@@ -45,15 +48,19 @@ func New(
 	if inputController == nil {
 		return nil, errors.New("desktop input controller is required")
 	}
+	if clipboardController == nil {
+		return nil, errors.New("desktop clipboard controller is required")
+	}
 	if logger == nil {
 		return nil, errors.New("desktop logger is required")
 	}
 	return &Service{
-		cfg:    cfg,
-		media:  mediaService,
-		input:  inputController,
-		logger: logger,
-		ready:  make(chan struct{}),
+		cfg:       cfg,
+		media:     mediaService,
+		input:     inputController,
+		clipboard: clipboardController,
+		logger:    logger,
+		ready:     make(chan struct{}),
 	}, nil
 }
 
@@ -81,6 +88,11 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 	defer func() {
 		runErr = errors.Join(runErr, s.input.Close())
 	}()
+	if s.clipboard.Enabled() {
+		if err := s.clipboard.Attach(ctx, session); err != nil {
+			return fmt.Errorf("attach portal clipboard: %w", err)
+		}
+	}
 
 	authorization := session.InputAuthorization()
 	if authorization.Enabled {

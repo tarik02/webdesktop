@@ -82,6 +82,17 @@ command.
 At least one input class must be enabled when input is active. Only one peer
 can hold the input lease.
 
+## Clipboard
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `clipboard.enabled` | `true` | Synchronizes text, HTML, and supported image formats |
+
+Clipboard access uses the Wayland Clipboard portal and requires `input.enabled` and
+`input.keyboard`.
+Only the peer holding the input lease receives desktop clipboard content or may
+replace it. Transfers are limited to 32 MiB.
+
 ## WebRTC
 
 | Setting | Default | Notes |
