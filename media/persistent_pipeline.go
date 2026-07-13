@@ -180,6 +180,7 @@ func newVideoEncoderBranch(
 		"undershoot=95",
 		"min-quantizer=4",
 		"max-quantizer=20",
+		"error-resilient=default",
 		fmt.Sprintf("keyframe-max-dist=%d", tuning.KeyframeInterval),
 		"end-usage=cbr",
 	}, " ")
