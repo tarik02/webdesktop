@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-gst/go-gst/gst"
@@ -193,6 +194,7 @@ type Service struct {
 	stopSamples  chan struct{}
 	closeSamples sync.Once
 	updateMu     sync.Mutex
+	active       atomic.Bool
 }
 
 // New constructs the media service without requesting portal authorization.
@@ -240,6 +242,7 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 		s.cfg.Quality,
 		s.cfg.Tuning,
 		s.emitSample,
+		&s.active,
 		s.logger.Named("gstreamer"),
 	)
 	if err != nil {
@@ -316,6 +319,25 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 // Samples returns encoded frames from the active pipeline.
 func (s *Service) Samples() <-chan Sample {
 	return s.samples
+}
+
+// SetActive controls whether capture frames are delivered to the video encoder.
+func (s *Service) SetActive(active bool) {
+	previous := s.active.Swap(active)
+	if !active || previous {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running || s.pipeline == nil {
+		return
+	}
+	if err := s.pipeline.RequestKeyframe(); err != nil {
+		s.logger.Debug("keyframe request after video delivery resumed was not applied",
+			zap.Error(err),
+		)
+	}
 }
 
 // Quality returns the configured or active runtime quality.
