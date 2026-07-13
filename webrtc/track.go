@@ -115,8 +115,20 @@ func (t *sampleTrack) WriteSample(data []byte, timestampAdvance time.Duration) (
 
 func (t *sampleTrack) durationToTicks(binding *trackBinding, duration time.Duration) uint32 {
 	const nanosPerSecond = uint64(time.Second)
-	total := uint64(duration)*uint64(t.capability.ClockRate) + binding.remainder
-	ticks := total / nanosPerSecond
-	binding.remainder = total % nanosPerSecond
+	maxTicks := uint64(^uint32(0))
+	seconds := uint64(duration / time.Second)
+	nanoseconds := uint64(duration % time.Second)
+	wholeTicks := seconds * uint64(t.capability.ClockRate)
+	if wholeTicks >= maxTicks {
+		binding.remainder = 0
+		return uint32(maxTicks)
+	}
+	fractional := nanoseconds*uint64(t.capability.ClockRate) + binding.remainder
+	ticks := wholeTicks + fractional/nanosPerSecond
+	binding.remainder = fractional % nanosPerSecond
+	if ticks > maxTicks {
+		binding.remainder = 0
+		return uint32(maxTicks)
+	}
 	return uint32(ticks)
 }

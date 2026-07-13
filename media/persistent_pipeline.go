@@ -453,8 +453,10 @@ func (b *videoEncoderBranch) handleSample(sink *gstapp.Sink) gst.FlowReturn {
 	defer buffer.Unref()
 
 	var pts time.Duration
-	if value := buffer.PresentationTimestamp().AsDuration(); value != nil {
-		pts = *value
+	ptsValue := buffer.PresentationTimestamp().AsDuration()
+	ptsValid := ptsValue != nil
+	if ptsValid {
+		pts = *ptsValue
 	}
 	var duration time.Duration
 	if value := buffer.Duration().AsDuration(); value != nil {
@@ -505,6 +507,7 @@ func (b *videoEncoderBranch) handleSample(sink *gstapp.Sink) gst.FlowReturn {
 		Codec:      b.quality.Codec,
 		ProducedAt: producedAt,
 		PTS:        pts,
+		PTSValid:   ptsValid,
 		Duration:   duration,
 		KeyFrame:   keyFrame,
 	}) {

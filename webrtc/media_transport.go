@@ -42,18 +42,18 @@ func (m *videoMailbox) put(sample media.Sample) videoPutResult {
 }
 func (m *videoMailbox) take(ctx context.Context) (media.Sample, bool) {
 	for {
+		m.mu.Lock()
+		if m.pending != nil {
+			sample := *m.pending
+			m.pending = nil
+			m.mu.Unlock()
+			return sample, true
+		}
+		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return media.Sample{}, false
 		case <-m.wake:
-			m.mu.Lock()
-			if m.pending != nil {
-				sample := *m.pending
-				m.pending = nil
-				m.mu.Unlock()
-				return sample, true
-			}
-			m.mu.Unlock()
 		}
 	}
 }
@@ -121,7 +121,7 @@ func positiveDiscontinuityDuration(duration time.Duration, clockRate uint32) tim
 	if duration > 0 {
 		return duration
 	}
-	return time.Second / time.Duration(clockRate)
+	return (time.Second + time.Duration(clockRate) - 1) / time.Duration(clockRate)
 }
 
 func (p *peer) readRTCP(sender *pion.RTPSender, video bool) {
@@ -206,8 +206,6 @@ func (p *peer) writeVideoSamples() {
 	var origin time.Time
 	var previousProducedAt time.Time
 	var previousPTS time.Duration
-	var firstPTS time.Duration
-	var rtpAnchorTicks uint64
 	var rtpTicksTotal uint64
 	havePreviousPTS := false
 	for {
@@ -223,21 +221,20 @@ func (p *peer) writeVideoSamples() {
 		if !previousProducedAt.IsZero() {
 			productionGap = sample.ProducedAt.Sub(previousProducedAt)
 		}
-		ptsRegressed := havePreviousPTS && sample.PTS <= previousPTS
+		ptsRegressed := havePreviousPTS && sample.PTSValid && sample.PTS <= previousPTS
 		if ptsRegressed {
 			p.videoPTSRegressions.Add(1)
-			if !sample.KeyFrame {
-				p.videoNeedsKeyframe.Store(true)
-				p.videoSamplesDropped.Add(1)
-				continue
-			}
 		}
 		timestampAdvance := time.Duration(0)
-		if havePreviousPTS {
-			if ptsRegressed {
+		if !previousProducedAt.IsZero() {
+			timestampAdvance = sample.ProducedAt.Sub(previousProducedAt)
+			clockRate := uint64(p.videoTrack.capability.ClockRate)
+			minimumTick := positiveDiscontinuityDuration(0, p.videoTrack.capability.ClockRate)
+			maximumGap := time.Duration((uint64(^uint32(0)) / 2) * uint64(time.Second) / clockRate)
+			if timestampAdvance <= 0 || timestampAdvance > maximumGap {
 				timestampAdvance = positiveDiscontinuityDuration(sample.Duration, p.videoTrack.capability.ClockRate)
-			} else {
-				timestampAdvance = sample.PTS - previousPTS
+			} else if timestampAdvance < minimumTick {
+				timestampAdvance = minimumTick
 			}
 		}
 		sampleAge := time.Since(sample.ProducedAt)
@@ -273,18 +270,14 @@ func (p *peer) writeVideoSamples() {
 		p.videoRTPElapsed.Store(int64(rtpElapsed))
 		p.videoProductionGap.Store(int64(productionGap))
 		p.videoSampleDuration.Store(int64(sample.Duration))
-		if !havePreviousPTS || ptsRegressed {
-			firstPTS = sample.PTS
-			rtpAnchorTicks = rtpTicksTotal
-		}
-		mediaElapsed := sample.PTS - firstPTS
-		rtpMediaElapsed := time.Duration((rtpTicksTotal-rtpAnchorTicks)/clockRate)*time.Second + time.Duration(((rtpTicksTotal-rtpAnchorTicks)%clockRate)*uint64(time.Second)/clockRate)
-		p.videoTimingDrift.Store(int64(rtpMediaElapsed - mediaElapsed))
+		p.videoTimingDrift.Store(int64(rtpElapsed - producedElapsed))
 		p.videoRTPTicks.Store(rtpTicksTotal)
 		p.videoLastRTPTicks.Store(uint64(rtpTicks))
 		previousProducedAt = sample.ProducedAt
-		previousPTS = sample.PTS
-		havePreviousPTS = true
+		if sample.PTSValid {
+			previousPTS = sample.PTS
+			havePreviousPTS = true
+		}
 	}
 }
 
