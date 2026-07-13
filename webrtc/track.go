@@ -19,8 +19,11 @@ const (
 )
 
 type trackBinding struct {
-	id     string
-	writer pion.TrackLocalWriter
+	id         string
+	writer     pion.TrackLocalWriter
+	packetizer rtp.Packetizer
+	remainder  uint64
+	writeMu    sync.Mutex
 }
 
 type sampleTrack struct {
@@ -30,35 +33,19 @@ type sampleTrack struct {
 	id         string
 	streamID   string
 
-	mu         sync.RWMutex
-	binding    *trackBinding
-	packetizer rtp.Packetizer
-	remainder  float64
+	mu       sync.RWMutex
+	bindings map[string]*trackBinding
 }
 
-func newSampleTrack(
-	capability pion.RTPCodecCapability,
-	payloader string,
-	kind pion.RTPCodecType,
-	id string,
-	streamID string,
-) *sampleTrack {
-	return &sampleTrack{
-		capability: capability,
-		payloader:  payloader,
-		kind:       kind,
-		id:         id,
-		streamID:   streamID,
-	}
+func newSampleTrack(capability pion.RTPCodecCapability, payloader string, kind pion.RTPCodecType, id string, streamID string) *sampleTrack {
+	return &sampleTrack{capability: capability, payloader: payloader, kind: kind, id: id, streamID: streamID, bindings: make(map[string]*trackBinding)}
 }
 
 func (t *sampleTrack) Bind(context pion.TrackLocalContext) (pion.RTPCodecParameters, error) {
 	var negotiated pion.RTPCodecParameters
 	found := false
 	for _, codec := range context.CodecParameters() {
-		if strings.EqualFold(codec.MimeType, t.capability.MimeType) &&
-			codec.ClockRate == t.capability.ClockRate &&
-			codec.Channels == t.capability.Channels {
+		if strings.EqualFold(codec.MimeType, t.capability.MimeType) && codec.ClockRate == t.capability.ClockRate && codec.Channels == t.capability.Channels {
 			negotiated = codec
 			found = true
 			break
@@ -80,20 +67,12 @@ func (t *sampleTrack) Bind(context pion.TrackLocalContext) (pion.RTPCodecParamet
 		return pion.RTPCodecParameters{}, fmt.Errorf("unsupported RTP payloader %q", t.payloader)
 	}
 
-	t.mu.Lock()
-	t.binding = &trackBinding{
-		id:     context.ID(),
-		writer: context.WriteStream(),
+	binding := &trackBinding{
+		id: context.ID(), writer: context.WriteStream(),
+		packetizer: rtp.NewPacketizer(outboundMTU, uint8(negotiated.PayloadType), uint32(context.SSRC()), payloader, rtp.NewRandomSequencer(), t.capability.ClockRate),
 	}
-	t.packetizer = rtp.NewPacketizer(
-		outboundMTU,
-		uint8(negotiated.PayloadType),
-		uint32(context.SSRC()),
-		payloader,
-		rtp.NewRandomSequencer(),
-		t.capability.ClockRate,
-	)
-	t.remainder = 0
+	t.mu.Lock()
+	t.bindings[binding.id] = binding
 	t.mu.Unlock()
 	return negotiated, nil
 }
@@ -101,82 +80,66 @@ func (t *sampleTrack) Bind(context pion.TrackLocalContext) (pion.RTPCodecParamet
 func (t *sampleTrack) Unbind(context pion.TrackLocalContext) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.binding == nil || t.binding.id != context.ID() {
+	if _, ok := t.bindings[context.ID()]; !ok {
 		return pion.ErrUnbindFailed
 	}
-	t.binding = nil
+	delete(t.bindings, context.ID())
 	return nil
 }
 
-func (t *sampleTrack) ID() string {
-	return t.id
-}
+func (t *sampleTrack) ID() string              { return t.id }
+func (t *sampleTrack) RID() string             { return "" }
+func (t *sampleTrack) StreamID() string        { return t.streamID }
+func (t *sampleTrack) Kind() pion.RTPCodecType { return t.kind }
 
-func (t *sampleTrack) RID() string {
-	return ""
-}
-
-func (t *sampleTrack) StreamID() string {
-	return t.streamID
-}
-
-func (t *sampleTrack) Kind() pion.RTPCodecType {
-	return t.kind
-}
-
-func (t *sampleTrack) WriteSample(data []byte, duration time.Duration) (uint32, error) {
-	if duration <= 0 {
-		return 0, errors.New("RTP sample duration must be positive")
-	}
-
-	t.mu.Lock()
-	binding := t.binding
-	packetizer := t.packetizer
-	if binding == nil || packetizer == nil {
-		t.mu.Unlock()
-		return 0, nil
-	}
-	total := duration.Seconds()*float64(t.capability.ClockRate) + t.remainder
-	ticks := uint32(total)
-	t.remainder = total - float64(ticks)
-	packets := packetizer.Packetize(data, ticks)
-	t.mu.Unlock()
-	for _, packet := range packets {
-		if _, err := binding.writer.WriteRTP(&packet.Header, packet.Payload); err != nil {
-			return 0, err
-		}
-	}
-	return ticks, nil
-}
-
-func (t *sampleTrack) WriteSampleAt(data []byte, timestampAdvance time.Duration) (uint64, error) {
+func (t *sampleTrack) WriteSample(data []byte, timestampAdvance time.Duration) (uint32, error) {
 	if timestampAdvance < 0 {
 		return 0, errors.New("RTP timestamp advance must not be negative")
 	}
-
-	t.mu.Lock()
-	binding := t.binding
-	packetizer := t.packetizer
-	if binding == nil || packetizer == nil {
-		t.mu.Unlock()
-		return 0, nil
+	t.mu.RLock()
+	bindings := make([]*trackBinding, 0, len(t.bindings))
+	for _, binding := range t.bindings {
+		bindings = append(bindings, binding)
 	}
-
-	clockRate := uint64(t.capability.ClockRate)
-	wholeTicks := uint64(timestampAdvance/time.Second) * clockRate
-	fraction := float64(timestampAdvance%time.Second)*float64(clockRate)/float64(time.Second) + t.remainder
-	fractionTicks := uint64(fraction)
-	ticks := wholeTicks + fractionTicks
-	t.remainder = fraction - float64(fractionTicks)
-	if advance := uint32(ticks); advance > 0 {
-		packetizer.SkipSamples(advance)
-	}
-	packets := packetizer.Packetize(data, 0)
-	t.mu.Unlock()
-	for _, packet := range packets {
-		if _, err := binding.writer.WriteRTP(&packet.Header, packet.Payload); err != nil {
-			return 0, err
+	t.mu.RUnlock()
+	var firstErr error
+	var firstTicks uint32
+	for index, binding := range bindings {
+		binding.writeMu.Lock()
+		ticks := t.durationToTicks(binding, timestampAdvance)
+		if ticks > 0 {
+			binding.packetizer.SkipSamples(ticks)
+		}
+		packets := binding.packetizer.Packetize(data, 0)
+		for _, packet := range packets {
+			if _, err := binding.writer.WriteRTP(&packet.Header, packet.Payload); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		binding.writeMu.Unlock()
+		if index == 0 {
+			firstTicks = ticks
 		}
 	}
-	return ticks, nil
+	return firstTicks, firstErr
+}
+
+func (t *sampleTrack) durationToTicks(binding *trackBinding, duration time.Duration) uint32 {
+	const nanosPerSecond = uint64(time.Second)
+	maxTicks := uint64(^uint32(0))
+	seconds := uint64(duration / time.Second)
+	nanoseconds := uint64(duration % time.Second)
+	wholeTicks := seconds * uint64(t.capability.ClockRate)
+	if wholeTicks >= maxTicks {
+		binding.remainder = 0
+		return uint32(maxTicks)
+	}
+	fractional := nanoseconds*uint64(t.capability.ClockRate) + binding.remainder
+	ticks := wholeTicks + fractional/nanosPerSecond
+	binding.remainder = fractional % nanosPerSecond
+	if ticks > maxTicks {
+		binding.remainder = 0
+		return uint32(maxTicks)
+	}
+	return uint32(ticks)
 }

@@ -42,12 +42,13 @@ type Config struct {
 	Tuning   Tuning
 }
 
-// Sample is one encoded video frame ready for transport.
+// Sample is one encoded video frame ready for transport. ProducedAt records encoder latency instrumentation; PTS is diagnostic metadata and may be invalid.
 type Sample struct {
 	Data       []byte
 	Codec      string
 	ProducedAt time.Time
 	PTS        time.Duration
+	PTSValid   bool
 	Duration   time.Duration
 	KeyFrame   bool
 }

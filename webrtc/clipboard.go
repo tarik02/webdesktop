@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -41,91 +42,153 @@ type clipboardMessage struct {
 	Error   *protocolError          `json:"error,omitempty"`
 }
 
+type clipboardChannelState struct {
+	channel            *pion.DataChannel
+	ctx                context.Context
+	bufferedLow        chan struct{}
+	closed             chan struct{}
+	cancel             context.CancelFunc
+	closeOnce          sync.Once
+	receive            *clipboardReceive
+	receiveReserved    bool
+	transferGeneration uint64
+}
+
 type clipboardReceive struct {
-	id      string
-	formats []clipboard.Format
-	sizes   []int
-	index   int
-	written int
-	timer   *time.Timer
+	id       string
+	formats  []clipboard.Format
+	sizes    []int
+	index    int
+	written  int
+	timer    *time.Timer
+	activity uint64
 }
 
 func (p *peer) setClipboardChannel(channel *pion.DataChannel) {
+	if p.isClosing() {
+		_ = channel.Close()
+		return
+	}
 	if !channel.Ordered() || channel.MaxPacketLifeTime() != nil || channel.MaxRetransmits() != nil {
 		p.logger.Info("rejecting clipboard data channel without reliable ordered delivery")
 		_ = channel.Close()
 		return
 	}
 
-	p.clipboardMu.Lock()
-	if p.clipboard != nil {
-		p.clipboardMu.Unlock()
-		p.logger.Info("rejecting duplicate clipboard data channel")
-		_ = channel.Close()
-		return
+	state := &clipboardChannelState{
+		channel:     channel,
+		bufferedLow: make(chan struct{}, 1),
+		closed:      make(chan struct{}),
 	}
-	p.clipboard = channel
-	p.clipboardBufferedLow = make(chan struct{}, 1)
-	p.clipboardClosed = make(chan struct{})
+	stateCtx, cancel := context.WithCancel(p.ctx)
+	state.ctx = stateCtx
+	state.cancel = cancel
+	p.clipboardMu.Lock()
+	previous := p.clipboardState
+	p.clipboardState = state
+	p.clipboardMu.Unlock()
+	if previous != nil {
+		previous.cancel()
+		p.clipboardMu.Lock()
+		if previous.receive != nil {
+			previous.receive.timer.Stop()
+			previous.receive = nil
+		}
+		previous.receiveReserved = false
+		p.clipboardMu.Unlock()
+		previous.closeOnce.Do(func() { close(previous.closed) })
+		_ = previous.channel.Close()
+	}
 	channel.SetBufferedAmountLowThreshold(256 * 1024)
 	channel.OnBufferedAmountLow(func() {
 		select {
-		case p.clipboardBufferedLow <- struct{}{}:
+		case state.bufferedLow <- struct{}{}:
 		default:
 		}
 	})
-	p.clipboardMu.Unlock()
 
+	cleanup := func() {
+		cancel()
+		p.clipboardMu.Lock()
+		owned := p.clipboardState == state
+		if owned {
+			if state.receive != nil {
+				state.receive.timer.Stop()
+				state.receive = nil
+			}
+			state.receiveReserved = false
+			p.clipboardState = nil
+		}
+		p.clipboardMu.Unlock()
+		if owned {
+			state.closeOnce.Do(func() { close(state.closed) })
+		}
+	}
 	channel.OnOpen(func() {
+		if !p.clipboardCurrent(state) {
+			return
+		}
 		p.logger.Info("clipboard data channel opened")
 		updates, unsubscribe := p.service.clipboard.Subscribe()
-		go func() {
+		if !p.goOwned(func() {
 			defer unsubscribe()
 			for {
 				select {
-				case <-p.ctx.Done():
+				case <-stateCtx.Done():
 					return
 				case content, ok := <-updates:
-					if !ok {
-						return
-					}
-					if !p.service.input.Owns(p.id) {
+					if !ok || !p.service.input.Owns(p.id) {
+						if !ok {
+							return
+						}
 						continue
 					}
-					if err := p.writeClipboardContent(channel, content); err != nil {
+					if err := p.writeClipboardContent(channel, content, state); err != nil {
 						p.logger.Debug("send desktop clipboard content", zap.Error(err))
 						return
 					}
 				}
 			}
-		}()
-	})
-	channel.OnClose(func() {
-		p.logger.Info("clipboard data channel closed")
-		p.clipboardMu.Lock()
-		if p.clipboardReceive != nil {
-			p.clipboardReceive.timer.Stop()
-			p.clipboardReceive = nil
+		}) {
+			unsubscribe()
 		}
-		p.clipboardMu.Unlock()
-		p.clipboardCloseOnce.Do(func() { close(p.clipboardClosed) })
 	})
-	channel.OnError(func(err error) {
-		p.logger.Debug("clipboard data channel error", zap.Error(err))
-		p.clipboardMu.Lock()
-		if p.clipboardReceive != nil {
-			p.clipboardReceive.timer.Stop()
-			p.clipboardReceive = nil
-		}
-		p.clipboardMu.Unlock()
-		p.clipboardCloseOnce.Do(func() { close(p.clipboardClosed) })
-	})
-	channel.OnMessage(func(message pion.DataChannelMessage) {
-		p.handleClipboardMessage(channel, message)
-	})
+	channel.OnClose(func() { p.logger.Info("clipboard data channel closed"); cleanup() })
+	channel.OnError(func(err error) { p.logger.Debug("clipboard data channel error", zap.Error(err)); cleanup() })
+	channel.OnMessage(func(message pion.DataChannelMessage) { p.handleClipboardMessage(channel, message, state) })
 }
 
-func (p *peer) handleClipboardMessage(channel *pion.DataChannel, message pion.DataChannelMessage) {
+func (p *peer) clipboardCurrent(state *clipboardChannelState) bool {
+	p.clipboardMu.Lock()
+	current := p.clipboardState == state
+	p.clipboardMu.Unlock()
+	if !current {
+		return false
+	}
+	select {
+	case <-state.ctx.Done():
+		return false
+	default:
+		return true
+	}
+}
+
+func (p *peer) handleClipboardMessage(channel *pion.DataChannel, message pion.DataChannelMessage, state *clipboardChannelState) {
+	if p.isClosing() || !p.clipboardCurrent(state) {
+		return
+	}
+	if !message.IsString && len(message.Data) > clipboardChunkBytes {
+		p.clipboardMu.Lock()
+		if state.receive != nil {
+			state.receive.timer.Stop()
+			state.receive = nil
+		}
+		state.receiveReserved = false
+		state.transferGeneration++
+		p.clipboardMu.Unlock()
+		p.writeClipboardError(channel, "", "invalid_transfer", "clipboard data chunk exceeds maximum size")
+		return
+	}
 	if message.IsString {
 		if len(message.Data) > maxClipboardHeaderBytes || !utf8.Valid(message.Data) {
 			p.writeClipboardError(channel, "", "invalid_message", "invalid clipboard header")
@@ -152,6 +215,17 @@ func (p *peer) handleClipboardMessage(channel *pion.DataChannel, message pion.Da
 			return
 		}
 
+		p.clipboardMu.Lock()
+		if state.receive != nil || state.receiveReserved {
+			p.clipboardMu.Unlock()
+			p.writeClipboardError(channel, header.ID, "transfer_in_progress", "another clipboard transfer is in progress")
+			return
+		}
+		state.receiveReserved = true
+		state.transferGeneration++
+		transferGeneration := state.transferGeneration
+		p.clipboardMu.Unlock()
+
 		receive := &clipboardReceive{
 			id:      header.ID,
 			formats: make([]clipboard.Format, len(header.Formats)),
@@ -166,38 +240,34 @@ func (p *peer) handleClipboardMessage(channel *pion.DataChannel, message pion.Da
 		}
 
 		p.clipboardMu.Lock()
-		if p.clipboardReceive != nil {
+		if p.clipboardState != state || state.ctx.Err() != nil || state.transferGeneration != transferGeneration {
+			if state.transferGeneration == transferGeneration {
+				state.receiveReserved = false
+			}
 			p.clipboardMu.Unlock()
-			p.writeClipboardError(channel, header.ID, "transfer_in_progress", "another clipboard transfer is in progress")
 			return
 		}
 		if receive.index == len(receive.formats) {
+			state.receiveReserved = false
 			p.clipboardMu.Unlock()
-			p.finishClipboardReceive(channel, receive)
+			p.finishClipboardReceive(channel, state, receive)
 			return
 		}
-		receive.timer = time.AfterFunc(clipboardWriteTimeout, func() {
-			p.clipboardMu.Lock()
-			if p.clipboardReceive != receive {
-				p.clipboardMu.Unlock()
-				return
-			}
-			p.clipboardReceive = nil
-			p.clipboardMu.Unlock()
-			p.writeClipboardError(channel, receive.id, "transfer_timeout", "clipboard transfer timed out")
-		})
-		p.clipboardReceive = receive
+		p.armClipboardReceiveTimer(channel, state, receive)
+		state.receiveReserved = false
+		state.receive = receive
 		p.clipboardMu.Unlock()
 		return
 	}
 
 	p.clipboardMu.Lock()
-	receive := p.clipboardReceive
+	receive := state.receive
 	if receive == nil {
 		p.clipboardMu.Unlock()
 		p.writeClipboardError(channel, "", "unexpected_binary", "clipboard data arrived without a header")
 		return
 	}
+	p.armClipboardReceiveTimer(channel, state, receive)
 	remaining := message.Data
 	for len(remaining) > 0 && receive.index < len(receive.formats) {
 		available := receive.sizes[receive.index] - receive.written
@@ -215,7 +285,7 @@ func (p *peer) handleClipboardMessage(channel *pion.DataChannel, message pion.Da
 	}
 	if len(remaining) > 0 {
 		receive.timer.Stop()
-		p.clipboardReceive = nil
+		state.receive = nil
 		p.clipboardMu.Unlock()
 		p.writeClipboardError(channel, receive.id, "invalid_transfer", "clipboard payload exceeds declared sizes")
 		return
@@ -223,12 +293,30 @@ func (p *peer) handleClipboardMessage(channel *pion.DataChannel, message pion.Da
 	complete := receive.index == len(receive.formats)
 	if complete {
 		receive.timer.Stop()
-		p.clipboardReceive = nil
+		state.receive = nil
 	}
 	p.clipboardMu.Unlock()
 	if complete {
-		p.finishClipboardReceive(channel, receive)
+		p.finishClipboardReceive(channel, state, receive)
 	}
+}
+
+func (p *peer) armClipboardReceiveTimer(channel *pion.DataChannel, state *clipboardChannelState, receive *clipboardReceive) {
+	if receive.timer != nil {
+		receive.timer.Stop()
+	}
+	receive.activity++
+	activity := receive.activity
+	receive.timer = time.AfterFunc(clipboardWriteTimeout, func() {
+		p.clipboardMu.Lock()
+		if state.receive != receive || receive.activity != activity {
+			p.clipboardMu.Unlock()
+			return
+		}
+		state.receive = nil
+		p.clipboardMu.Unlock()
+		p.writeClipboardError(channel, receive.id, "transfer_timeout", "clipboard transfer timed out")
+	})
 }
 
 func validateClipboardHeader(header clipboardMessage) error {
@@ -265,16 +353,24 @@ func validateClipboardHeader(header clipboardMessage) error {
 	return nil
 }
 
-func (p *peer) finishClipboardReceive(channel *pion.DataChannel, receive *clipboardReceive) {
+func (p *peer) finishClipboardReceive(channel *pion.DataChannel, state *clipboardChannelState, receive *clipboardReceive) {
+	if !p.clipboardCurrent(state) {
+		return
+	}
 	if !p.service.input.Owns(p.id) {
 		p.writeClipboardError(channel, receive.id, "input_not_owned", "peer does not own input")
 		return
 	}
-	ctx, cancel := context.WithTimeout(p.ctx, clipboardWriteTimeout)
+	ctx, cancel := context.WithTimeout(state.ctx, clipboardWriteTimeout)
 	err := p.service.clipboard.Set(ctx, clipboard.Content{Formats: receive.formats})
 	cancel()
 	if err != nil {
-		p.writeClipboardError(channel, receive.id, "clipboard_write_failed", err.Error())
+		if p.clipboardCurrent(state) {
+			p.writeClipboardError(channel, receive.id, "clipboard_write_failed", err.Error())
+		}
+		return
+	}
+	if !p.clipboardCurrent(state) {
 		return
 	}
 	p.writeClipboardMessage(channel, clipboardMessage{
@@ -287,24 +383,30 @@ func (p *peer) finishClipboardReceive(channel *pion.DataChannel, receive *clipbo
 
 func (p *peer) sendLatestClipboard() {
 	p.clipboardMu.Lock()
-	channel := p.clipboard
+	state := p.clipboardState
 	p.clipboardMu.Unlock()
 	content, ok := p.service.clipboard.Latest()
-	if channel == nil || channel.ReadyState() != pion.DataChannelStateOpen || !ok {
+	if state == nil || !p.clipboardCurrent(state) || state.channel.ReadyState() != pion.DataChannelStateOpen || !ok {
 		return
 	}
-	if err := p.writeClipboardContent(channel, content); err != nil {
+	if err := p.writeClipboardContent(state.channel, content, state); err != nil {
 		p.logger.Debug("send current desktop clipboard content", zap.Error(err))
 	}
 }
 
-func (p *peer) writeClipboardContent(channel *pion.DataChannel, content clipboard.Content) error {
+func (p *peer) writeClipboardContent(channel *pion.DataChannel, content clipboard.Content, state *clipboardChannelState) error {
+	if !p.clipboardCurrent(state) {
+		return errors.New("clipboard data channel is no longer current")
+	}
 	formats := make([]clipboardFormatHeader, len(content.Formats))
 	for index, format := range content.Formats {
 		formats[index] = clipboardFormatHeader{MIME: format.MIME, Size: len(format.Data)}
 	}
 	p.clipboardWriteMu.Lock()
 	defer p.clipboardWriteMu.Unlock()
+	if !p.clipboardCurrent(state) {
+		return errors.New("clipboard data channel is no longer current")
+	}
 	p.clipboardSequence++
 	header, err := json.Marshal(clipboardMessage{
 		Version: clipboardVersion,
@@ -320,13 +422,16 @@ func (p *peer) writeClipboardContent(channel *pion.DataChannel, content clipboar
 	}
 	for _, format := range content.Formats {
 		for offset := 0; offset < len(format.Data); offset += clipboardChunkBytes {
+			if !p.clipboardCurrent(state) {
+				return errors.New("clipboard data channel is no longer current")
+			}
 			if channel.BufferedAmount() > 512*1024 {
 				select {
 				case <-p.ctx.Done():
 					return p.ctx.Err()
-				case <-p.clipboardClosed:
+				case <-state.closed:
 					return errors.New("clipboard data channel closed")
-				case <-p.clipboardBufferedLow:
+				case <-state.bufferedLow:
 				}
 			}
 			end := min(offset+clipboardChunkBytes, len(format.Data))
