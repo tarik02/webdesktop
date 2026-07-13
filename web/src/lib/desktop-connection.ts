@@ -1,9 +1,12 @@
 import { z } from "zod";
 import {
   controlResponseSchema,
+  clipboardMessageSchema,
   inputResponseSchema,
+  maximumClipboardBytes,
   signalResponseSchema,
   type ClientLogMessage,
+  type ClipboardFormat,
   type ClientTraceLevel,
   type ControlResponse,
   type InputMessage,
@@ -85,12 +88,27 @@ type ConnectionCallbacks = {
   onQuality: (quality: Quality) => void;
   onInputLease: (owned: boolean) => void;
   onInputError: (message: string) => void;
+  onClipboard: (formats: ClipboardFormat[]) => Promise<void>;
+  onClipboardError: (message: string) => void;
 };
 
 type PendingControl = {
   resolve: (response: ControlResponse) => void;
   reject: (error: Error) => void;
   timeout: number;
+};
+
+type PendingClipboard = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: number;
+};
+
+type ClipboardReceive = {
+  formats: Array<{ mimeType: ClipboardFormat["mimeType"]; data: Uint8Array<ArrayBuffer> }>;
+  sizes: number[];
+  index: number;
+  written: number;
 };
 
 export class ProtocolError extends Error {
@@ -107,8 +125,13 @@ export class DesktopConnection {
   private socket: WebSocket | null = null;
   private control: RTCDataChannel | null = null;
   private input: RTCDataChannel | null = null;
+  private clipboard: RTCDataChannel | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private pendingControl = new Map<string, PendingControl>();
+  private pendingClipboard = new Map<string, PendingClipboard>();
+  private clipboardReceive: ClipboardReceive | null = null;
+  private clipboardSend = Promise.resolve();
+  private clipboardApply = Promise.resolve();
   private pressedKeys = new Set<number>();
   private pressedButtons = new Set<"primary" | "middle" | "secondary" | "back" | "forward">();
   private nextRequestID = 1;
@@ -235,8 +258,16 @@ export class DesktopConnection {
 
     const control = pc.createDataChannel("control", { ordered: true });
     const input = pc.createDataChannel("input", { ordered: true });
+    const clipboard = this.config.clipboard.enabled
+      ? pc.createDataChannel("clipboard", { ordered: true })
+      : null;
     this.control = control;
     this.input = input;
+    this.clipboard = clipboard;
+    if (clipboard) {
+      clipboard.binaryType = "arraybuffer";
+      clipboard.bufferedAmountLowThreshold = 256 * 1024;
+    }
 
     control.addEventListener("open", () => {
       this.trace("info", "data-channel.open", { channel: "control" });
@@ -312,6 +343,26 @@ export class DesktopConnection {
       } catch (error) {
         this.fail(error);
       }
+    });
+
+    clipboard?.addEventListener("open", () => {
+      this.trace("info", "data-channel.open", { channel: "clipboard" });
+      this.updateConnected();
+    });
+    clipboard?.addEventListener("close", () => {
+      this.trace("warn", "data-channel.close", { channel: "clipboard" });
+      if (!this.closing) {
+        this.fail(new Error("clipboard data channel closed"));
+      }
+    });
+    clipboard?.addEventListener("error", () => {
+      this.trace("error", "data-channel.error", { channel: "clipboard" });
+      if (!this.closing) {
+        this.fail(new Error("clipboard data channel failed"));
+      }
+    });
+    clipboard?.addEventListener("message", (event) => {
+      void this.handleClipboardMessage(event.data).catch((error) => this.fail(error));
     });
 
     pc.addEventListener("track", (event) => {
@@ -803,6 +854,85 @@ export class DesktopConnection {
     });
   }
 
+  pasteClipboard(formats: ClipboardFormat[]) {
+    const transfer = this.clipboardSend
+      .catch(() => undefined)
+      .then(async () => {
+        const channel = this.clipboard;
+        if (!channel || channel.readyState !== "open") {
+          throw new Error("clipboard data channel is not open");
+        }
+        if (formats.length === 0) {
+          throw new Error("clipboard has no supported content");
+        }
+        if (formats.length > 8) {
+          throw new Error("clipboard has too many formats");
+        }
+        const totalBytes = formats.reduce((total, format) => total + format.data.byteLength, 0);
+        if (totalBytes > maximumClipboardBytes) {
+          throw new Error("clipboard content exceeds 32 MiB");
+        }
+
+        const id = this.requestID("clipboard");
+        const completion = new Promise<void>((resolve, reject) => {
+          const timeout = window.setTimeout(() => {
+            this.pendingClipboard.delete(id);
+            reject(new Error(`clipboard transfer ${id} timed out`));
+          }, 15_000);
+          this.pendingClipboard.set(id, { resolve, reject, timeout });
+        });
+        try {
+          channel.send(
+            JSON.stringify({
+              version: 1,
+              type: "clipboard.content",
+              id,
+              formats: formats.map((format) => ({
+                mime_type: format.mimeType,
+                size: format.data.byteLength,
+              })),
+            }),
+          );
+          for (const format of formats) {
+            const data = new Uint8Array(format.data);
+            for (let offset = 0; offset < data.byteLength; offset += 16 * 1024) {
+              if (channel.bufferedAmount > 512 * 1024) {
+                await new Promise<void>((resolve, reject) => {
+                  const drained = () => {
+                    channel.removeEventListener("close", closed);
+                    resolve();
+                  };
+                  const closed = () => {
+                    channel.removeEventListener("bufferedamountlow", drained);
+                    reject(new Error("clipboard data channel closed"));
+                  };
+                  channel.addEventListener("bufferedamountlow", drained, { once: true });
+                  channel.addEventListener("close", closed, { once: true });
+                });
+              }
+              channel.send(data.slice(offset, offset + 16 * 1024));
+            }
+          }
+          await completion;
+        } catch (error) {
+          const pending = this.pendingClipboard.get(id);
+          if (pending) {
+            window.clearTimeout(pending.timeout);
+            this.pendingClipboard.delete(id);
+          }
+          throw error;
+        }
+
+        this.releasePressed();
+        this.keyboardKey(29, true);
+        this.keyboardKey(47, true);
+        this.keyboardKey(47, false);
+        this.keyboardKey(29, false);
+      });
+    this.clipboardSend = transfer;
+    return transfer;
+  }
+
   releasePressed() {
     for (const keycode of this.pressedKeys) {
       this.sendInput({
@@ -845,6 +975,110 @@ export class DesktopConnection {
     }
     this.leaseOwned = false;
     this.closeTransports();
+  }
+
+  private async handleClipboardMessage(data: string | ArrayBuffer) {
+    if (typeof data === "string") {
+      const message = clipboardMessageSchema.parse(JSON.parse(data));
+      if (message.type === "clipboard.content.result") {
+        const pending = this.pendingClipboard.get(message.id);
+        if (!pending) {
+          throw new Error(`unexpected clipboard response ${message.id}`);
+        }
+        window.clearTimeout(pending.timeout);
+        this.pendingClipboard.delete(message.id);
+        pending.resolve();
+        return;
+      }
+      if (message.type === "error") {
+        const error = new ProtocolError(message.error.code, message.error.message);
+        const pending = this.pendingClipboard.get(message.id);
+        if (pending) {
+          window.clearTimeout(pending.timeout);
+          this.pendingClipboard.delete(message.id);
+          pending.reject(error);
+        } else {
+          this.callbacks.onClipboardError(`${error.code}: ${error.message}`);
+        }
+        return;
+      }
+      if (this.clipboardReceive) {
+        throw new Error("another desktop clipboard transfer is in progress");
+      }
+      this.clipboardReceive = {
+        formats: message.formats.map((format) => ({
+          mimeType: format.mime_type,
+          data: new Uint8Array(new ArrayBuffer(format.size)),
+        })),
+        sizes: message.formats.map((format) => format.size),
+        index: 0,
+        written: 0,
+      };
+      while (
+        this.clipboardReceive.index < this.clipboardReceive.sizes.length &&
+        this.clipboardReceive.sizes[this.clipboardReceive.index] === 0
+      ) {
+        this.clipboardReceive.index += 1;
+      }
+      if (this.clipboardReceive.index === this.clipboardReceive.formats.length) {
+        const receive = this.clipboardReceive;
+        this.clipboardReceive = null;
+        this.applyClipboard(receive.formats);
+      }
+      return;
+    }
+
+    const receive = this.clipboardReceive;
+    if (!receive) {
+      throw new Error("clipboard data arrived without a header");
+    }
+    let offset = 0;
+    const chunk = new Uint8Array(data);
+    while (offset < chunk.byteLength && receive.index < receive.formats.length) {
+      const available = receive.sizes[receive.index] - receive.written;
+      const copied = Math.min(available, chunk.byteLength - offset);
+      receive.formats[receive.index].data.set(
+        chunk.subarray(offset, offset + copied),
+        receive.written,
+      );
+      receive.written += copied;
+      offset += copied;
+      if (receive.written === receive.sizes[receive.index]) {
+        receive.index += 1;
+        receive.written = 0;
+        while (receive.index < receive.sizes.length && receive.sizes[receive.index] === 0) {
+          receive.index += 1;
+        }
+      }
+    }
+    if (offset !== chunk.byteLength) {
+      this.clipboardReceive = null;
+      throw new Error("clipboard payload exceeds declared sizes");
+    }
+    if (receive.index === receive.formats.length) {
+      this.clipboardReceive = null;
+      this.applyClipboard(receive.formats);
+    }
+  }
+
+  private applyClipboard(
+    formats: Array<{ mimeType: ClipboardFormat["mimeType"]; data: Uint8Array<ArrayBuffer> }>,
+  ) {
+    this.clipboardApply = this.clipboardApply
+      .catch(() => undefined)
+      .then(() =>
+        this.callbacks.onClipboard(
+          formats.map((format) => ({
+            mimeType: format.mimeType,
+            data: format.data.buffer,
+          })),
+        ),
+      )
+      .catch((error) => {
+        this.callbacks.onClipboardError(
+          error instanceof Error ? error.message : "could not write the browser clipboard",
+        );
+      });
   }
 
   private async handleSignal(data: unknown) {
@@ -930,7 +1164,8 @@ export class DesktopConnection {
     if (
       this.pc?.connectionState === "connected" &&
       this.control?.readyState === "open" &&
-      this.input?.readyState === "open"
+      this.input?.readyState === "open" &&
+      (!this.config.clipboard.enabled || this.clipboard?.readyState === "open")
     ) {
       if (this.reportedConnected) {
         return;
@@ -984,14 +1219,23 @@ export class DesktopConnection {
       pending.reject(new Error("connection closed"));
     }
     this.pendingControl.clear();
+    for (const pending of this.pendingClipboard.values()) {
+      window.clearTimeout(pending.timeout);
+      pending.reject(new Error("connection closed"));
+    }
+    this.pendingClipboard.clear();
     this.leaseOwned = false;
     this.callbacks.onInputLease(false);
     this.control?.close();
     this.input?.close();
+    this.clipboard?.close();
     this.pc?.close();
     this.socket?.close(1000, "client disconnect");
     this.control = null;
     this.input = null;
+    this.clipboard = null;
+    this.clipboardReceive = null;
+    this.clipboardSend = Promise.resolve();
     this.pc = null;
     this.socket = null;
     this.pendingCandidates = [];

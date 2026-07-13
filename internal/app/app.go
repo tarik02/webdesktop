@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tarik02/webdesktop/capture"
+	"github.com/tarik02/webdesktop/clipboard"
 	"github.com/tarik02/webdesktop/config"
 	"github.com/tarik02/webdesktop/desktop"
 	"github.com/tarik02/webdesktop/httpserver"
@@ -45,6 +46,7 @@ func New(cfg config.Config) (*App, error) {
 			Pointer:  cfg.Input.Pointer,
 			Keyboard: cfg.Input.Keyboard,
 		},
+		Clipboard: cfg.Clipboard.Enabled,
 	}
 	inputController, err := remoteinput.New(remoteinput.Config{
 		Enabled:   cfg.Input.Enabled,
@@ -56,6 +58,7 @@ func New(cfg config.Config) (*App, error) {
 		_ = logger.Sync()
 		return nil, err
 	}
+	clipboardController := clipboard.New(cfg.Clipboard.Enabled)
 
 	mediaService, err := media.New(media.Config{
 		Capture: portalConfig,
@@ -92,6 +95,7 @@ func New(cfg config.Config) (*App, error) {
 		portalConfig,
 		mediaService,
 		inputController,
+		clipboardController,
 		logger.Named("desktop"),
 	)
 	if err != nil {
@@ -111,7 +115,7 @@ func New(cfg config.Config) (*App, error) {
 		MaxPeers:       cfg.WebRTC.MaxPeers,
 		AllowedOrigins: cfg.WebRTC.AllowedOrigins,
 		TracingEnabled: cfg.Tracing.Enabled,
-	}, mediaService, audioService, inputController, logger.Named("webrtc"))
+	}, mediaService, audioService, inputController, clipboardController, logger.Named("webrtc"))
 	if err != nil {
 		_ = inputController.Close()
 		_ = logger.Sync()
@@ -135,6 +139,9 @@ func New(cfg config.Config) (*App, error) {
 					Pointer  bool `json:"pointer"`
 					Keyboard bool `json:"keyboard"`
 				} `json:"input"`
+				Clipboard struct {
+					Enabled bool `json:"enabled"`
+				} `json:"clipboard"`
 			}{
 				Version:       1,
 				SignalingPath: cfg.WebRTC.SignalingPath,
@@ -154,6 +161,9 @@ func New(cfg config.Config) (*App, error) {
 					Pointer:  cfg.Input.Pointer,
 					Keyboard: cfg.Input.Keyboard,
 				},
+				Clipboard: struct {
+					Enabled bool `json:"enabled"`
+				}{Enabled: cfg.Clipboard.Enabled},
 			})
 		})
 		router.GET("/api/status", func(c *gin.Context) {

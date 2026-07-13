@@ -1,10 +1,11 @@
 # Protocol
 
-Protocol version 1 uses a WebSocket for signaling and two client-created WebRTC
+Protocol version 1 uses a WebSocket for signaling and client-created WebRTC
 data channels:
 
 - `control`, reliable and ordered
 - `input`, reliable and ordered
+- `clipboard`, reliable and ordered when clipboard synchronization is enabled
 
 One WebSocket owns one peer connection. It accepts one offer and does not
 renegotiate.
@@ -20,6 +21,7 @@ The client offer must include:
 - a recv-only video transceiver
 - a reliable ordered `control` data channel
 - a reliable ordered `input` data channel when remote input is needed
+- a reliable ordered `clipboard` data channel when clipboard synchronization is enabled
 - an active Opus audio media section when server audio is enabled
 
 Client offer:
@@ -304,3 +306,48 @@ closes the input channel.
 The server rejects unknown fields, missing required fields, `null` in required
 fields, multiple JSON values, binary messages, invalid UTF-8, oversized
 messages, and unordered or partial-reliable data channels.
+
+
+## Clipboard channel
+
+The clipboard channel alternates JSON text headers and binary payload chunks.
+Only the peer holding the input lease may receive or replace clipboard content.
+One transfer may contain up to eight formats and 32 MiB in total.
+
+Supported MIME types are `text/plain`, `text/html`, `image/png`, `image/jpeg`,
+`image/webp`, `image/gif`, and `image/svg+xml`. Browser support determines which
+rich formats can be written to the local system clipboard.
+
+A content header declares each binary representation in transfer order:
+
+```json
+{
+  "version": 1,
+  "type": "clipboard.content",
+  "id": "clipboard-7",
+  "formats": [
+    { "mime_type": "text/plain", "size": 5 },
+    { "mime_type": "text/html", "size": 12 }
+  ]
+}
+```
+
+Binary messages immediately following the header fill each declared format in
+order. The receiver uses the declared sizes, so chunk boundaries do not need to
+match format boundaries.
+
+When a browser-to-desktop transfer becomes the portal selection, the server
+responds:
+
+```json
+{
+  "version": 1,
+  "type": "clipboard.content.result",
+  "id": "clipboard-7",
+  "ok": true
+}
+```
+
+Errors use the same `id`, `type: "error"`, and the standard `error` object.
+The embedded client waits for success before injecting the remote paste chord.
+Desktop copy changes travel in the opposite direction without a result message.

@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ClipboardEvent as ReactClipboardEvent,
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
@@ -35,10 +36,12 @@ import {
 import { evdevKeycode } from "#/lib/keyboard.ts";
 import {
   maximumH264BitrateKbps,
+  clipboardMIMESchema,
   maximumVP8BitrateKbps,
   minimumVideoBitrateKbps,
   serverConfigSchema,
   type Quality,
+  type ClipboardFormat,
   type ServerConfig,
 } from "#/lib/protocol.ts";
 
@@ -296,6 +299,30 @@ export function App() {
         setLeaseOwned(owned);
       },
       onInputError: setError,
+      onClipboard: async (formats) => {
+        const entries = Object.fromEntries(
+          formats
+            .filter((format) => ClipboardItem.supports(format.mimeType))
+            .map((format) => [format.mimeType, new Blob([format.data], { type: format.mimeType })]),
+        );
+        if (Object.keys(entries).length > 0) {
+          try {
+            await navigator.clipboard.write([new ClipboardItem(entries)]);
+            setError(null);
+            return;
+          } catch (cause) {
+            if (!formats.some((format) => format.mimeType === "text/plain")) {
+              throw cause;
+            }
+          }
+        }
+        const text = formats.find((format) => format.mimeType === "text/plain");
+        if (text) {
+          await navigator.clipboard.writeText(new TextDecoder().decode(text.data));
+          setError(null);
+        }
+      },
+      onClipboardError: setError,
     });
     connectionRef.current = connection;
     try {
@@ -561,6 +588,49 @@ export function App() {
     connectionRef.current?.releasePressed();
   };
 
+  const paste = async (event: ReactClipboardEvent<HTMLDivElement>) => {
+    if (
+      !config?.clipboard.enabled ||
+      !leaseOwnedRef.current ||
+      !inputCapabilitiesRef.current.keyboard ||
+      !connectionRef.current
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const formats = new Map<ClipboardFormat["mimeType"], ClipboardFormat>();
+    for (const mimeType of event.clipboardData.types) {
+      const supported = clipboardMIMESchema.safeParse(mimeType.toLowerCase());
+      if (!supported.success || !supported.data.startsWith("text/")) {
+        continue;
+      }
+      const encoded = new TextEncoder().encode(event.clipboardData.getData(mimeType));
+      formats.set(supported.data, {
+        mimeType: supported.data,
+        data: encoded.buffer,
+      });
+    }
+    for (const item of event.clipboardData.items) {
+      const supported = clipboardMIMESchema.safeParse(item.type.toLowerCase());
+      if (!supported.success || item.kind !== "file") {
+        continue;
+      }
+      const file = item.getAsFile();
+      if (file) {
+        formats.set(supported.data, {
+          mimeType: supported.data,
+          data: await file.arrayBuffer(),
+        });
+      }
+    }
+    try {
+      await connectionRef.current.pasteClipboard([...formats.values()]);
+      setError(null);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  };
+
   const keyboard = (event: KeyboardEvent<HTMLDivElement>, pressed: boolean) => {
     if (!leaseOwnedRef.current || !inputCapabilitiesRef.current.keyboard) {
       return;
@@ -568,6 +638,14 @@ export function App() {
     if (pressed && event.code === "Escape" && event.ctrlKey && event.altKey && event.shiftKey) {
       event.preventDefault();
       void releaseInput();
+      return;
+    }
+    if (
+      pressed &&
+      config?.clipboard.enabled &&
+      ((event.code === "KeyV" && (event.ctrlKey || event.metaKey)) ||
+        (event.code === "Insert" && event.shiftKey))
+    ) {
       return;
     }
     const keycode = evdevKeycode(event.code);
@@ -655,6 +733,7 @@ export function App() {
         onPointerCancel={pointerCaptureLost}
         onKeyDown={(event) => keyboard(event, true)}
         onKeyUp={(event) => keyboard(event, false)}
+        onPaste={(event) => void paste(event)}
         onContextMenu={(event) => event.preventDefault()}
       >
         <video

@@ -64,6 +64,7 @@ func newServeCommand() *cobra.Command {
 	flags.Bool("input-pointer", defaults.Input.Pointer, "enable remote pointer input")
 	flags.Bool("input-keyboard", defaults.Input.Keyboard, "enable remote keyboard input")
 	flags.Int("input-queue-size", defaults.Input.QueueSize, "bounded remote input event queue size")
+	flags.Bool("clipboard-enabled", defaults.Clipboard.Enabled, "synchronize the desktop clipboard")
 	flags.String("webrtc-signaling-path", defaults.WebRTC.SignalingPath, "WebSocket signaling path")
 	flags.Int("webrtc-max-peers", defaults.WebRTC.MaxPeers, "maximum concurrent WebRTC peers")
 	flags.StringSlice("webrtc-ice-server", defaults.WebRTC.ICEServers, "ICE server URL; may be repeated")
@@ -106,6 +107,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("input.pointer", defaults.Input.Pointer)
 	v.SetDefault("input.keyboard", defaults.Input.Keyboard)
 	v.SetDefault("input.queue_size", defaults.Input.QueueSize)
+	v.SetDefault("clipboard.enabled", defaults.Clipboard.Enabled)
 	v.SetDefault("webrtc.signaling_path", defaults.WebRTC.SignalingPath)
 	v.SetDefault("webrtc.max_peers", defaults.WebRTC.MaxPeers)
 	v.SetDefault("webrtc.ice_servers", defaults.WebRTC.ICEServers)
@@ -138,6 +140,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"input.pointer",
 		"input.keyboard",
 		"input.queue_size",
+		"clipboard.enabled",
 		"webrtc.signaling_path",
 		"webrtc.max_peers",
 		"webrtc.ice_servers",
@@ -175,6 +178,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"input-pointer":           "input.pointer",
 		"input-keyboard":          "input.keyboard",
 		"input-queue-size":        "input.queue_size",
+		"clipboard-enabled":       "clipboard.enabled",
 		"webrtc-signaling-path":   "webrtc.signaling_path",
 		"webrtc-max-peers":        "webrtc.max_peers",
 		"webrtc-ice-server":       "webrtc.ice_servers",
