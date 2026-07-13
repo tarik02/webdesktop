@@ -35,9 +35,7 @@ import {
 } from "#/lib/desktop-connection.ts";
 import { evdevKeycode } from "#/lib/keyboard.ts";
 import {
-  maximumH264BitrateKbps,
   clipboardMIMESchema,
-  maximumVP8BitrateKbps,
   minimumVideoBitrateKbps,
   serverConfigSchema,
   type Quality,
@@ -465,22 +463,27 @@ export function App() {
 
   const applyQuality = async (event: FormEvent) => {
     event.preventDefault();
-    if (!quality || !appliedQuality || !connectionRef.current) {
+    if (!config || !quality || !appliedQuality || !connectionRef.current) {
       return;
     }
     setError(null);
     try {
-      const codecChanged = quality.codec !== appliedQuality.codec;
+      const currentProfile = config.video_profiles[appliedQuality.profile];
+      const nextProfile = config.video_profiles[quality.profile];
+      if (!currentProfile || !nextProfile) {
+        throw new Error("selected video profile is unavailable");
+      }
+      const codecChanged = currentProfile.codec.id !== nextProfile.codec.id;
       const nextQuality = await connectionRef.current.setQuality({
-        ...(quality.codec === appliedQuality.codec ? {} : { codec: quality.codec }),
+        ...(quality.profile === appliedQuality.profile ? {} : { profile: quality.profile }),
         width: quality.width,
         height: quality.height,
         framerate: quality.framerate,
         bitrate_kbps: quality.bitrate_kbps,
       });
       setQualityOpen(false);
+      setConfig((current) => (current ? { ...current, video: nextQuality } : current));
       if (codecChanged) {
-        setConfig((current) => (current ? { ...current, video: nextQuality } : current));
         await reconnect();
       }
     } catch (cause) {
@@ -697,6 +700,14 @@ export function App() {
   };
 
   const connected = connectionState.phase === "connected";
+  const profileOptions = config
+    ? Object.entries(config.video_profiles).sort((left, right) =>
+        left[1].label.localeCompare(right[1].label),
+      )
+    : [];
+  const selectedProfile = config && quality ? config.video_profiles[quality.profile] : null;
+  const appliedProfile =
+    config && appliedQuality ? config.video_profiles[appliedQuality.profile] : null;
   const statusLabel =
     connectionState.phase === "connecting"
       ? connectionState.detail
@@ -827,20 +838,23 @@ export function App() {
                 <FieldGroup>
                   <FieldSet disabled={!connected || !quality}>
                     <Field>
-                      <FieldLabel htmlFor="quality-codec">Codec</FieldLabel>
+                      <FieldLabel htmlFor="quality-profile">Encoder</FieldLabel>
                       <NativeSelect
-                        id="quality-codec"
+                        id="quality-profile"
                         className="w-full"
-                        value={quality?.codec ?? ""}
+                        value={quality?.profile ?? ""}
                         onChange={(event) => {
-                          const codec = event.currentTarget.value;
-                          if (codec === "vp8" || codec === "h264") {
-                            setQuality((current) => (current ? { ...current, codec } : current));
+                          const profile = event.currentTarget.value;
+                          if (config?.video_profiles[profile]) {
+                            setQuality((current) => (current ? { ...current, profile } : current));
                           }
                         }}
                       >
-                        <NativeSelectOption value="vp8">VP8</NativeSelectOption>
-                        <NativeSelectOption value="h264">H.264</NativeSelectOption>
+                        {profileOptions.map(([name, profile]) => (
+                          <NativeSelectOption key={name} value={name}>
+                            {profile.label}
+                          </NativeSelectOption>
+                        ))}
                       </NativeSelect>
                     </Field>
                     <FieldGroup className="grid grid-cols-2 gap-3">
@@ -897,9 +911,9 @@ export function App() {
                           type="number"
                           min={minimumVideoBitrateKbps}
                           max={
-                            quality?.codec === "h264"
-                              ? maximumH264BitrateKbps
-                              : maximumVP8BitrateKbps
+                            selectedProfile && selectedProfile.limits.max_bitrate_kbps > 0
+                              ? selectedProfile.limits.max_bitrate_kbps
+                              : undefined
                           }
                           value={quality?.bitrate_kbps ?? ""}
                           onChange={(event) => {
@@ -1012,7 +1026,7 @@ export function App() {
                 <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 tabular-nums">
                   <dt className="text-muted-foreground">Stream</dt>
                   <dd className="text-right">
-                    {appliedQuality?.codec.toUpperCase() ?? "—"} ·{" "}
+                    {appliedProfile?.label ?? "—"} ·{" "}
                     {performanceStats.width && performanceStats.height
                       ? `${performanceStats.width}×${performanceStats.height}`
                       : "—"}

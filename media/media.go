@@ -15,22 +15,12 @@ import (
 )
 
 const (
-	CodecVP8  = "vp8"
-	CodecH264 = "h264"
-
-	MinBitrateKbps                 = 100
-	VP8MaxBitrateKbps              = 2147483
-	H264SDPProfileLevelID          = "42e02a"
-	H264Level                      = "4.2"
-	H264MaxMacroblocksPerDimension = 263
-	H264MaxMacroblocksPerFrame     = 8704
-	H264MaxMacroblocksPerSecond    = 522240
-	H264MaxLevelBitrateKbps        = 50000
+	MinBitrateKbps = 100
 )
 
 // Quality contains runtime-adjustable video settings.
 type Quality struct {
-	Codec       string `json:"codec"`
+	Profile     string `json:"profile"`
 	Width       int    `json:"width"`
 	Height      int    `json:"height"`
 	Framerate   int    `json:"framerate"`
@@ -46,9 +36,10 @@ type Tuning struct {
 
 // Config contains capture, quality, and encoder settings.
 type Config struct {
-	Capture capture.Config
-	Quality Quality
-	Tuning  Tuning
+	Capture  capture.Config
+	Profiles map[string]EncoderProfile
+	Quality  Quality
+	Tuning   Tuning
 }
 
 // Sample is one encoded video frame ready for transport.
@@ -68,7 +59,7 @@ func (cfg Config) Validate() error {
 	if err := cfg.Capture.Validate(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := cfg.Quality.Validate(); err != nil {
+	if err := ValidateProfiles(cfg.Profiles, cfg.Quality, cfg.Tuning); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -85,14 +76,41 @@ func (cfg Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// Validate checks runtime video quality settings.
-func (quality Quality) Validate() error {
+// ValidateProfiles checks all profile definitions and the selected quality.
+func ValidateProfiles(profiles map[string]EncoderProfile, quality Quality, tuning Tuning) error {
 	var errs []error
+	if len(profiles) == 0 {
+		errs = append(errs, errors.New("at least one video profile is required"))
+	}
+	for name, profile := range profiles {
+		profileQuality := quality
+		profileQuality.Profile = name
+		if err := profile.Validate(name, profileQuality, tuning); err != nil {
+			errs = append(errs, err)
+		}
+		for otherName, otherProfile := range profiles {
+			if name < otherName && profile.Codec.ID == otherProfile.Codec.ID && !profile.Codec.Compatible(otherProfile.Codec) {
+				errs = append(errs, fmt.Errorf(
+					"video profiles %q and %q use codec id %q with different WebRTC metadata",
+					name,
+					otherName,
+					profile.Codec.ID,
+				))
+			}
+		}
+	}
+	if err := quality.Validate(profiles); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
 
-	switch quality.Codec {
-	case CodecVP8, CodecH264:
-	default:
-		errs = append(errs, errors.New("video codec must be vp8 or h264"))
+// Validate checks runtime video quality settings.
+func (quality Quality) Validate(profiles map[string]EncoderProfile) error {
+	var errs []error
+	profile, exists := profiles[quality.Profile]
+	if !exists {
+		errs = append(errs, fmt.Errorf("video profile %q is not configured", quality.Profile))
 	}
 
 	if quality.Width < 320 || quality.Width > 7680 || quality.Width%2 != 0 {
@@ -110,66 +128,63 @@ func (quality Quality) Validate() error {
 			MinBitrateKbps,
 		))
 	}
-	switch quality.Codec {
-	case CodecVP8:
-		if quality.BitrateKbps > VP8MaxBitrateKbps {
-			errs = append(errs, fmt.Errorf(
-				"VP8 bitrate must not exceed %d Kbit/s",
-				VP8MaxBitrateKbps,
-			))
-		}
-	case CodecH264:
-		errs = append(errs, ValidateH264Level42(quality))
+	if exists {
+		errs = append(errs, profile.Limits.Validate(quality.Profile, quality))
 	}
 
 	return errors.Join(errs...)
 }
 
-// ValidateH264Level42 checks constrained-baseline Level 4.2 limits.
-func ValidateH264Level42(quality Quality) error {
+// Validate checks the profile-specific quality limits.
+func (limits QualityLimits) Validate(profileName string, quality Quality) error {
 	widthMacroblocks := (quality.Width + 15) / 16
 	heightMacroblocks := (quality.Height + 15) / 16
 	macroblocks := widthMacroblocks * heightMacroblocks
 	var errs []error
-	if widthMacroblocks > H264MaxMacroblocksPerDimension {
+	if limits.MaxMacroblocksPerDimension > 0 && widthMacroblocks > limits.MaxMacroblocksPerDimension {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.2 width must not exceed %d macroblocks; width %d requires %d",
-			H264MaxMacroblocksPerDimension,
+			"video profile %q width must not exceed %d macroblocks; width %d requires %d",
+			profileName,
+			limits.MaxMacroblocksPerDimension,
 			quality.Width,
 			widthMacroblocks,
 		))
 	}
-	if heightMacroblocks > H264MaxMacroblocksPerDimension {
+	if limits.MaxMacroblocksPerDimension > 0 && heightMacroblocks > limits.MaxMacroblocksPerDimension {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.2 height must not exceed %d macroblocks; height %d requires %d",
-			H264MaxMacroblocksPerDimension,
+			"video profile %q height must not exceed %d macroblocks; height %d requires %d",
+			profileName,
+			limits.MaxMacroblocksPerDimension,
 			quality.Height,
 			heightMacroblocks,
 		))
 	}
-	if macroblocks > H264MaxMacroblocksPerFrame {
+	if limits.MaxMacroblocksPerFrame > 0 && macroblocks > limits.MaxMacroblocksPerFrame {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.2 supports at most %d macroblocks per frame; %dx%d requires %d",
-			H264MaxMacroblocksPerFrame,
+			"video profile %q supports at most %d macroblocks per frame; %dx%d requires %d",
+			profileName,
+			limits.MaxMacroblocksPerFrame,
 			quality.Width,
 			quality.Height,
 			macroblocks,
 		))
 	}
-	if macroblocks*quality.Framerate > H264MaxMacroblocksPerSecond {
+	if limits.MaxMacroblocksPerSecond > 0 && macroblocks*quality.Framerate > limits.MaxMacroblocksPerSecond {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.2 supports at most %d macroblocks per second; %dx%d at %d fps requires %d",
-			H264MaxMacroblocksPerSecond,
+			"video profile %q supports at most %d macroblocks per second; %dx%d at %d fps requires %d",
+			profileName,
+			limits.MaxMacroblocksPerSecond,
 			quality.Width,
 			quality.Height,
 			quality.Framerate,
 			macroblocks*quality.Framerate,
 		))
 	}
-	if quality.BitrateKbps > H264MaxLevelBitrateKbps {
+	if limits.MaxBitrateKbps > 0 && quality.BitrateKbps > limits.MaxBitrateKbps {
 		errs = append(errs, fmt.Errorf(
-			"H.264 Level 4.2 bitrate must not exceed %d Kbit/s",
-			H264MaxLevelBitrateKbps,
+			"video profile %q bitrate must not exceed %d Kbit/s",
+			profileName,
+			limits.MaxBitrateKbps,
 		))
 	}
 	return errors.Join(errs...)
@@ -240,6 +255,7 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 	pipeline, err := newPersistentVideoPipeline(
 		stream,
 		s.cfg.Quality,
+		s.cfg.Profiles[s.cfg.Quality.Profile],
 		s.cfg.Tuning,
 		s.emitSample,
 		&s.active,
@@ -260,7 +276,8 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 
 	s.logger.Info("desktop capture started",
 		zap.Uint32("pipewire_node_id", stream.NodeID),
-		zap.String("codec", s.cfg.Quality.Codec),
+		zap.String("profile", s.cfg.Quality.Profile),
+		zap.String("codec", s.cfg.Profiles[s.cfg.Quality.Profile].Codec.ID),
 		zap.Int("width", s.cfg.Quality.Width),
 		zap.Int("height", s.cfg.Quality.Height),
 		zap.Int("framerate", s.cfg.Quality.Framerate),
@@ -347,10 +364,16 @@ func (s *Service) Quality() Quality {
 	return s.quality
 }
 
+// Profile returns one configured encoder profile.
+func (s *Service) Profile(name string) (EncoderProfile, bool) {
+	profile, exists := s.cfg.Profiles[name]
+	return profile, exists
+}
+
 // UpdateQuality applies bitrate-only changes live. All other quality changes
 // replace only the encoder branch.
 func (s *Service) UpdateQuality(quality Quality) error {
-	if err := quality.Validate(); err != nil {
+	if err := quality.Validate(s.cfg.Profiles); err != nil {
 		return err
 	}
 
@@ -371,12 +394,17 @@ func (s *Service) UpdateQuality(quality Quality) error {
 	}
 
 	started := time.Now()
-	bitrateOnly := quality.Codec == current.Codec &&
+	bitrateOnly := quality.Profile == current.Profile &&
 		quality.Width == current.Width &&
 		quality.Height == current.Height &&
 		quality.Framerate == current.Framerate
 	if !bitrateOnly {
-		if err := pipeline.ReplaceQuality(quality, s.cfg.Tuning, videoPipelineReadyTimeout); err != nil {
+		if err := pipeline.ReplaceQuality(
+			quality,
+			s.cfg.Profiles[quality.Profile],
+			s.cfg.Tuning,
+			videoPipelineReadyTimeout,
+		); err != nil {
 			return fmt.Errorf("replace video encoder branch: %w", err)
 		}
 	} else if err := pipeline.SetBitrate(quality.BitrateKbps); err != nil {
@@ -393,14 +421,15 @@ func (s *Service) UpdateQuality(quality Quality) error {
 
 	if bitrateOnly {
 		s.logger.Info("video bitrate updated",
-			zap.String("codec", quality.Codec),
+			zap.String("profile", quality.Profile),
 			zap.Int("bitrate_kbps", quality.BitrateKbps),
 			zap.Duration("duration", time.Since(started)),
 		)
 		return nil
 	}
 	s.logger.Info("video quality updated",
-		zap.String("codec", quality.Codec),
+		zap.String("profile", quality.Profile),
+		zap.String("codec", s.cfg.Profiles[quality.Profile].Codec.ID),
 		zap.Int("width", quality.Width),
 		zap.Int("height", quality.Height),
 		zap.Int("framerate", quality.Framerate),

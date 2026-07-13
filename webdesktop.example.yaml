@@ -12,7 +12,7 @@ tracing:
 video:
   source: monitor
   cursor_mode: embedded
-  codec: vp8
+  profile: vp8
   width: 1920
   height: 1080
   framerate: 30
@@ -21,6 +21,168 @@ video:
     threads: 8
     keyframe_interval: 60
     vp8_cpu_used: 16
+  profiles:
+    vp8:
+      label: VP8
+      encoder_element: encoder
+      pipeline: >-
+        videoconvert !
+        videoscale method=nearest-neighbour !
+        video/x-raw,format=I420,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
+        vp8enc name={{ element "encoder" }}
+        target-bitrate={{ mul .BitrateKbps 1000 }}
+        cpu-used={{ .VP8CPUUsed }}
+        threads={{ .Threads }}
+        deadline=1
+        buffer-initial-size=6144
+        buffer-optimal-size=9216
+        buffer-size=12288
+        undershoot=95
+        min-quantizer=4
+        max-quantizer=20
+        error-resilient=default
+        keyframe-max-dist={{ .KeyframeInterval }}
+        end-usage=cbr !
+        video/x-vp8
+      bitrate:
+        - element: encoder
+          property: target-bitrate
+          type: int
+          value: "{{ mul .BitrateKbps 1000 }}"
+      codec:
+        id: vp8
+        mime_type: video/VP8
+        clock_rate: 90000
+        channels: 0
+        payload_type: 96
+        payloader: vp8
+        sdp_fmtp_line: ""
+        rtcp_feedback:
+          - type: nack
+            parameter: ""
+          - type: nack
+            parameter: pli
+          - type: ccm
+            parameter: fir
+        sdp:
+          offer_fmtp: {}
+          answer_fmtp: {}
+      limits:
+        max_bitrate_kbps: 2147483
+        max_macroblocks_per_dimension: 0
+        max_macroblocks_per_frame: 0
+        max_macroblocks_per_second: 0
+    h264-vaapi:
+      label: H.264 (VA-API)
+      encoder_element: encoder
+      pipeline: >-
+        vapostproc name={{ element "postproc" }} qos=true scale-method=fast !
+        video/x-raw(memory:VAMemory),format=NV12,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
+        vah264enc name={{ element "encoder" }}
+        bitrate={{ .BitrateKbps }}
+        cpb-size={{ ceilDiv (mul .BitrateKbps 3) .Framerate }}
+        key-int-max={{ .KeyframeInterval }}
+        b-frames=0
+        cabac=false
+        dct8x8=false
+        mbbrc=disabled
+        num-slices=4
+        ref-frames=1
+        target-usage=6
+        rate-control=cbr
+        cc-insert=false !
+        h264parse name={{ element "parser" }} config-interval=-1 !
+        video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)4.2
+      bitrate:
+        - element: encoder
+          property: cpb-size
+          type: uint
+          value: "{{ ceilDiv (mul .BitrateKbps 3) .Framerate }}"
+        - element: encoder
+          property: bitrate
+          type: uint
+          value: "{{ .BitrateKbps }}"
+      codec:
+        id: h264
+        mime_type: video/H264
+        clock_rate: 90000
+        channels: 0
+        payload_type: 102
+        payloader: h264
+        sdp_fmtp_line: level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e02a
+        rtcp_feedback:
+          - type: nack
+            parameter: ""
+          - type: nack
+            parameter: pli
+          - type: ccm
+            parameter: fir
+        sdp:
+          offer_fmtp:
+            packetization-mode: ^1$
+            profile-level-id: (?i)^42e0[0-9a-f]{2}$
+          answer_fmtp:
+            profile-level-id: 42e02a
+      limits:
+        max_bitrate_kbps: 50000
+        max_macroblocks_per_dimension: 263
+        max_macroblocks_per_frame: 8704
+        max_macroblocks_per_second: 522240
+    h264-software:
+      label: H.264 (software)
+      encoder_element: encoder
+      pipeline: >-
+        videoconvert !
+        videoscale method=nearest-neighbour !
+        video/x-raw,format=I420,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
+        x264enc name={{ element "encoder" }}
+        option-string=level=4.2
+        bitrate={{ .BitrateKbps }}
+        vbv-buf-capacity={{ ceilDiv 3000 .Framerate }}
+        key-int-max={{ .KeyframeInterval }}
+        threads={{ .Threads }}
+        speed-preset=ultrafast
+        tune=zerolatency
+        pass=cbr
+        bframes=0
+        cabac=false
+        dct8x8=false
+        ref=1
+        sliced-threads=true
+        byte-stream=true !
+        h264parse name={{ element "parser" }} config-interval=-1 !
+        video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)4.2
+      bitrate:
+        - element: encoder
+          property: bitrate
+          type: uint
+          value: "{{ .BitrateKbps }}"
+      codec:
+        id: h264
+        mime_type: video/H264
+        clock_rate: 90000
+        channels: 0
+        payload_type: 102
+        payloader: h264
+        sdp_fmtp_line: level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e02a
+        rtcp_feedback:
+          - type: nack
+            parameter: ""
+          - type: nack
+            parameter: pli
+          - type: ccm
+            parameter: fir
+        sdp:
+          offer_fmtp:
+            packetization-mode: ^1$
+            profile-level-id: (?i)^42e0[0-9a-f]{2}$
+          answer_fmtp:
+            profile-level-id: 42e02a
+      limits:
+        max_bitrate_kbps: 50000
+        max_macroblocks_per_dimension: 263
+        max_macroblocks_per_frame: 8704
+        max_macroblocks_per_second: 522240
 
 audio:
   enabled: false

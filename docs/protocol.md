@@ -1,7 +1,7 @@
 # Protocol
 
-Protocol version 1 uses a WebSocket for signaling and client-created WebRTC
-data channels:
+Signaling uses protocol version 1, control uses version 2, and input and
+clipboard messages use version 1. The client creates these WebRTC data channels:
 
 - `control`, reliable and ordered
 - `input`, reliable and ordered
@@ -106,11 +106,11 @@ caller-selected ID.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "id": "quality-42",
   "type": "video.quality.set",
   "quality": {
-    "codec": "h264",
+    "profile": "h264-software",
     "width": 1920,
     "height": 1080,
     "framerate": 60,
@@ -126,12 +126,12 @@ Successful response:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "id": "quality-42",
   "type": "video.quality.set.result",
   "ok": true,
   "quality": {
-    "codec": "h264",
+    "profile": "h264-software",
     "width": 1920,
     "height": 1080,
     "framerate": 60,
@@ -144,7 +144,7 @@ Errors preserve the request ID:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "id": "quality-42",
   "type": "error",
   "ok": false,
@@ -155,8 +155,9 @@ Errors preserve the request ID:
 }
 ```
 
-Quality is global because all peers share one encoder. A codec change closes
-peers using the old codec and requires a new SDP exchange.
+Quality is global because all peers share one encoder. A profile change rebuilds
+the encoder. If the new profile has different codec metadata, the server closes
+peers using the old codec and the client starts a new SDP exchange.
 
 ### Input lease
 
@@ -166,7 +167,7 @@ Acquire:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "id": "input-1",
   "type": "input.acquire"
 }
@@ -176,7 +177,7 @@ Successful response:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "id": "input-1",
   "type": "input.acquire.result",
   "ok": true,
@@ -191,7 +192,7 @@ Release:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "id": "input-2",
   "type": "input.release"
 }

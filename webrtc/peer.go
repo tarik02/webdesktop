@@ -44,7 +44,8 @@ type peer struct {
 
 	videoSender  *pion.RTPSender
 	videoTrack   *sampleTrack
-	videoCodec   string
+	videoProfile string
+	videoCodec   media.RTPCodec
 	videoSamples chan media.Sample
 	audioSender  *pion.RTPSender
 	audioTrack   *sampleTrack
@@ -123,9 +124,15 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 
 	s.qualityMu.Lock()
 	quality := s.source.Quality()
-	videoCodec := videoCodecCapability(quality.Codec)
+	profile, exists := s.source.Profile(quality.Profile)
+	if !exists {
+		s.qualityMu.Unlock()
+		s.releaseReservation()
+		return nil, fmt.Errorf("media profile %q is unavailable", quality.Profile)
+	}
+	videoCodec := videoCodecCapability(profile.Codec)
 	peerConnection, err := s.newPeerConnection(
-		quality.Codec,
+		profile.Codec,
 		videoCodec,
 	)
 	if err != nil {
@@ -137,6 +144,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	videoTrack := newSampleTrack(
 		videoCodec,
+		profile.Codec.Payloader,
 		pion.RTPCodecTypeVideo,
 		fmt.Sprintf("video-%d", id),
 		"desktop",
@@ -149,7 +157,8 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		conn:         connection,
 		pc:           peerConnection,
 		videoTrack:   videoTrack,
-		videoCodec:   quality.Codec,
+		videoProfile: quality.Profile,
+		videoCodec:   profile.Codec,
 		videoSamples: make(chan media.Sample),
 		ctx:          ctx,
 		cancel:       cancel,
@@ -170,6 +179,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 	if s.cfg.AudioEnabled {
 		peer.audioTrack = newSampleTrack(
 			s.audioCodec,
+			payloaderOpus,
 			pion.RTPCodecTypeAudio,
 			fmt.Sprintf("audio-%d", id),
 			"desktop",
@@ -384,10 +394,8 @@ func (p *peer) handleOffer(sdp string) error {
 			return err
 		}
 	}
-	if p.videoCodec == media.CodecH264 {
-		if err := validateH264Offer(sdp); err != nil {
-			return err
-		}
+	if err := validateVideoOffer(sdp, p.videoCodec); err != nil {
+		return err
 	}
 	p.offerHandled = true
 	if err := p.conn.SetReadDeadline(time.Now().Add(signalingPongWait)); err != nil {
@@ -421,10 +429,10 @@ func (p *peer) handleOffer(sdp string) error {
 		return errors.New("local answer is unavailable")
 	}
 	answerSDP := localDescription.SDP
-	if p.videoCodec == media.CodecH264 {
-		answerSDP, err = rewriteH264Answer(answerSDP)
+	if len(p.videoCodec.SDP.AnswerFmtp) > 0 {
+		answerSDP, err = rewriteVideoAnswer(answerSDP, p.videoCodec)
 		if err != nil {
-			return fmt.Errorf("set H.264 answer parameters: %w", err)
+			return fmt.Errorf("set video answer parameters: %w", err)
 		}
 	}
 	if !p.writeSignal(signalResponse{
@@ -604,7 +612,8 @@ func (p *peer) logTraceSnapshot() {
 	p.inputMu.Unlock()
 
 	fields := []zap.Field{
-		zap.String("codec", p.videoCodec),
+		zap.String("profile", p.videoProfile),
+		zap.String("codec", p.videoCodec.ID),
 		zap.Bool("connected", p.connected.Load()),
 		zap.Bool("video_needs_keyframe", p.videoNeedsKeyframe.Load()),
 		zap.String("peer_connection_state", p.pc.ConnectionState().String()),
@@ -866,14 +875,14 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	p.service.qualityMu.Lock()
 	current := p.service.source.Quality()
 	quality := media.Quality{
-		Codec:       current.Codec,
+		Profile:     current.Profile,
 		Width:       current.Width,
 		Height:      current.Height,
 		Framerate:   current.Framerate,
 		BitrateKbps: current.BitrateKbps,
 	}
-	if request.Quality.Value.Codec.Set {
-		quality.Codec = request.Quality.Value.Codec.Value
+	if request.Quality.Value.Profile.Set {
+		quality.Profile = request.Quality.Value.Profile.Value
 	}
 	if request.Quality.Value.Width.Set {
 		quality.Width = request.Quality.Value.Width.Value
@@ -887,23 +896,21 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	if request.Quality.Value.BitrateKbps.Set {
 		quality.BitrateKbps = request.Quality.Value.BitrateKbps.Value
 	}
-	if quality.Codec == media.CodecH264 {
-		if err := media.ValidateH264Level42(quality); err != nil {
-			p.service.qualityMu.Unlock()
-			p.writeControlError(channel, request.ID.Value, "h264_level_incompatible", err.Error())
-			return
-		}
-	}
 	err = p.service.source.UpdateQuality(quality)
 	effective := p.service.source.Quality()
-	codecChanged := err == nil && effective.Codec != current.Codec
+	currentProfile, currentExists := p.service.source.Profile(current.Profile)
+	effectiveProfile, effectiveExists := p.service.source.Profile(effective.Profile)
+	if err == nil && (!currentExists || !effectiveExists) {
+		err = errors.New("media profile metadata is unavailable after quality update")
+	}
+	codecChanged := err == nil && currentExists && effectiveExists && !currentProfile.Codec.Compatible(effectiveProfile.Codec)
 	var qualityGeneration uint64
 	var incompatiblePeers []*peer
 	if codecChanged {
 		p.service.qualityGeneration++
 		qualityGeneration = p.service.qualityGeneration
 		for _, peer := range p.service.peerSnapshot() {
-			if peer != p && peer.videoCodec != effective.Codec {
+			if peer != p && !peer.videoCodec.Compatible(effectiveProfile.Codec) {
 				incompatiblePeers = append(incompatiblePeers, peer)
 			}
 		}

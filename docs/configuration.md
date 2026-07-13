@@ -35,17 +35,25 @@ The complete default file is [webdesktop.example.yaml](../webdesktop.example.yam
 | --- | --- | --- |
 | `video.source` | `monitor` | Only monitor capture is implemented |
 | `video.cursor_mode` | `embedded` | `embedded` or `hidden` |
-| `video.codec` | `vp8` | `vp8` or `h264` |
+| `video.profile` | `vp8` | Selected key from `video.profiles` |
 | `video.width` | `1920` | Even value from 320 through 7680 |
 | `video.height` | `1080` | Even value from 240 through 4320 |
 | `video.framerate` | `30` | 1 through 120 |
 | `video.bitrate_kbps` | `4000` | At least 100 |
-| `video.tuning.threads` | `8` | VP8 threads, 1 through 64 |
+| `video.tuning.threads` | `8` | Encoder threads, 1 through 64 |
 | `video.tuning.keyframe_interval` | `60` | Frames, 1 through 600 |
 | `video.tuning.vp8_cpu_used` | `16` | VP8 speed setting, 0 through 16 |
+| `video.profiles` | three built-ins | Encoder pipeline, bitrate updates, codec metadata, and limits |
 
-H.264 uses constrained-baseline Level 4.2. Its quality must stay within all of
-these limits:
+The built-in profiles are:
+
+- `vp8`, software VP8 with `vp8enc`
+- `h264-software`, software H.264 with `x264enc`
+- `h264-vaapi`, VA-API H.264 with `vah264enc`
+
+VP8 remains the default. Both H.264 profiles produce constrained-baseline Level
+4.2 byte streams and use the same WebRTC codec metadata. Their quality must stay
+within all of these limits:
 
 - 263 rounded macroblocks in either dimension
 - 8704 macroblocks per frame
@@ -55,9 +63,49 @@ these limits:
 Macroblock dimensions round width and height up to multiples of 16.
 1920x1080 at 60 fps fits Level 4.2.
 
-Bitrate changes update the active encoder. Resolution and frame-rate changes
-start a replacement encoder and switch after its first keyframe. Codec changes
-require a new SDP exchange, so the embedded client reconnects.
+Bitrate changes apply the selected profile's `bitrate` properties to the active
+encoder. Profile, resolution, and frame-rate changes start a replacement
+encoder and switch after its first keyframe. Switching between the two H.264
+profiles keeps the existing peer connection because their codec metadata is
+identical. Switching between H.264 and VP8 requires a new SDP exchange, so the
+embedded client reconnects.
+
+### Encoder profile definitions
+
+Each `video.profiles` entry contains:
+
+| Field | Purpose |
+| --- | --- |
+| `label` | Browser UI label |
+| `pipeline` | GStreamer pipeline fragment between `videorate` and `appsink` |
+| `encoder_element` | Named element used for encoder tracing |
+| `bitrate` | Ordered live property updates with `element`, `property`, `type`, and templated `value` |
+| `codec` | Codec ID, MIME type, RTP clock and payload, payloader, RTCP feedback, and SDP metadata |
+| `limits` | Optional bitrate and macroblock limits; zero disables a limit |
+
+Pipeline and bitrate values use Go template syntax. The available values are
+`.Width`, `.Height`, `.Framerate`, `.BitrateKbps`, `.Threads`,
+`.KeyframeInterval`, and `.VP8CPUUsed`. `mul` multiplies two integers,
+`ceilDiv` divides and rounds up, and `element` prefixes an element name for the
+current encoder branch. For example:
+
+```yaml
+pipeline: >-
+  x264enc name={{ element "encoder" }}
+  bitrate={{ .BitrateKbps }} !
+  video/x-h264,stream-format=byte-stream,alignment=au
+bitrate:
+  - element: encoder
+    property: bitrate
+    type: uint
+    value: "{{ .BitrateKbps }}"
+```
+
+`codec.payloader` supports `vp8` and `h264`. `codec.sdp.offer_fmtp` maps FMTP
+parameter names to regular expressions required in a browser offer.
+`codec.sdp.answer_fmtp` replaces matching answer parameters. Profiles that use
+the same codec ID must have identical RTP and SDP metadata so their encoded
+streams can share active peer connections.
 
 ## Audio
 

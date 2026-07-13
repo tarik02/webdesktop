@@ -6,7 +6,7 @@ uses Pion for WebRTC. There is no X11 capture path or fallback.
 
 ## Features
 
-- VP8 software encoding and VA-API H.264 encoding
+- Runtime-configurable VP8, software H.264, and VA-API H.264 encoder profiles
 - Low-latency newest-frame pipeline with bounded queues
 - Live bitrate, resolution, and frame-rate changes
 - Optional Opus desktop audio
@@ -23,8 +23,8 @@ uses Pion for WebRTC. There is no X11 capture path or fallback.
 - GStreamer with the PipeWire, base, good, bad, and ugly plugins
 - libei
 
-The Nix package supplies the userspace dependencies. H.264 also needs a working
-VA-API driver. Desktop audio needs `pipewire-pulse`.
+The Nix package supplies the userspace dependencies. The VA-API H.264 profile
+also needs a working VA-API driver. Desktop audio needs `pipewire-pulse`.
 
 ## Run
 

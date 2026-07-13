@@ -156,7 +156,7 @@ export class DesktopConnection {
     private readonly callbacks: ConnectionCallbacks,
   ) {
     this.trace("info", "client.created", {
-      codec: config.video.codec,
+      profile: config.video.profile,
       audio_enabled: String(config.audio.enabled),
       input_enabled: String(config.input.enabled),
       visibility: document.visibilityState,
@@ -224,7 +224,7 @@ export class DesktopConnection {
     this.closing = false;
     this.connectStartedAt = performance.now();
     this.trace("info", "connect.start", {
-      codec: this.config.video.codec,
+      profile: this.config.video.profile,
       audio_enabled: String(this.config.audio.enabled),
     });
     this.callbacks.onState({ phase: "connecting", detail: "opening signaling" });
@@ -237,18 +237,15 @@ export class DesktopConnection {
     if (!capabilities) {
       throw new Error("browser did not report video codec capabilities");
     }
-    const preferredCodecs = capabilities.codecs.filter((codec) => {
-      if (this.config.video.codec === "vp8") {
-        return codec.mimeType.toLowerCase() === "video/vp8";
-      }
-      return (
-        codec.mimeType.toLowerCase() === "video/h264" &&
-        codec.sdpFmtpLine?.includes("packetization-mode=1") === true &&
-        codec.sdpFmtpLine.includes("profile-level-id=42e0")
-      );
-    });
+    const profile = this.config.video_profiles[this.config.video.profile];
+    if (!profile) {
+      throw new Error(`video profile ${this.config.video.profile} is unavailable`);
+    }
+    const preferredCodecs = capabilities.codecs.filter(
+      (codec) => codec.mimeType.toLowerCase() === profile.codec.mime_type.toLowerCase(),
+    );
     if (preferredCodecs.length === 0) {
-      throw new Error(`browser does not support ${this.config.video.codec.toUpperCase()}`);
+      throw new Error(`browser does not support ${profile.label}`);
     }
     videoTransceiver.setCodecPreferences(preferredCodecs);
 
@@ -534,7 +531,7 @@ export class DesktopConnection {
     let response: ControlResponse;
     try {
       response = await this.requestControl({
-        version: 1,
+        version: 2,
         id: this.requestID("input"),
         type: "input.acquire",
       });
@@ -588,7 +585,7 @@ export class DesktopConnection {
       return;
     }
     const response = await this.requestControl({
-      version: 1,
+      version: 2,
       id: this.requestID("input"),
       type: "input.release",
     });
@@ -604,7 +601,7 @@ export class DesktopConnection {
 
   async setQuality(quality: QualityPatch) {
     this.trace("info", "quality.set.start", {
-      codec: quality.codec ?? this.config.video.codec,
+      profile: quality.profile ?? this.config.video.profile,
       width: quality.width === undefined ? "unchanged" : String(quality.width),
       height: quality.height === undefined ? "unchanged" : String(quality.height),
       framerate: quality.framerate === undefined ? "unchanged" : String(quality.framerate),
@@ -613,7 +610,7 @@ export class DesktopConnection {
     let response: ControlResponse;
     try {
       response = await this.requestControl({
-        version: 1,
+        version: 2,
         id: this.requestID("quality"),
         type: "video.quality.set",
         quality,
@@ -636,7 +633,7 @@ export class DesktopConnection {
     }
     this.callbacks.onQuality(response.quality);
     this.trace("info", "quality.set.complete", {
-      codec: response.quality.codec,
+      profile: response.quality.profile,
       width: String(response.quality.width),
       height: String(response.quality.height),
       framerate: String(response.quality.framerate),
@@ -1122,7 +1119,7 @@ export class DesktopConnection {
   }
 
   private requestControl(message: {
-    version: 1;
+    version: 2;
     id: string;
     type: "input.acquire" | "input.release" | "video.quality.set";
     quality?: QualityPatch;
