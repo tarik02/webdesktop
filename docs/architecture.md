@@ -30,7 +30,8 @@ rebuild or pause the portal stream.
 The capture appsink keeps one sample. An application-owned single-frame slot
 feeds a one-buffer leaky encoder appsrc. If encoding slows down, each layer
 drops obsolete raw frames instead of blocking PipeWire or accumulating stale
-video.
+video. The portal capture session stays open while the service is idle, but raw
+frames only enter the encoder while at least one WebRTC peer is registered.
 
 `pipewiresrc` uses a frame keepalive based on the configured frame rate. This
 resends the latest buffer when the compositor provides damage-driven updates,

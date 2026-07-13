@@ -758,6 +758,7 @@ type persistentVideoPipeline struct {
 	elements  []*gst.Element
 	probePads []*gst.Pad
 	emit      func(<-chan struct{}, Sample) bool
+	active    *atomic.Bool
 	logger    *zap.Logger
 	trace     *persistentVideoPipelineTrace
 	samples   *videoSampleSlot
@@ -784,6 +785,7 @@ func newPersistentVideoPipeline(
 	quality Quality,
 	tuning Tuning,
 	emit func(<-chan struct{}, Sample) bool,
+	active *atomic.Bool,
 	logger *zap.Logger,
 ) (_ *persistentVideoPipeline, err error) {
 	defer func() {
@@ -937,6 +939,7 @@ func newPersistentVideoPipeline(
 		elements:       captureElements,
 		probePads:      probePads,
 		emit:           emit,
+		active:         active,
 		logger:         logger,
 		trace:          trace,
 		samples:        newVideoSampleSlot(),
@@ -982,6 +985,9 @@ func (p *persistentVideoPipeline) handleCaptureSample(sink *gstapp.Sink) gst.Flo
 	case <-p.stop:
 		return gst.FlowFlushing
 	default:
+	}
+	if !p.active.Load() {
+		return gst.FlowOK
 	}
 
 	started := time.Now()
