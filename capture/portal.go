@@ -780,7 +780,9 @@ func loadRestoreToken(cfg Config) (string, string, bool, error) {
 	if err != nil {
 		return "", "", false, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	info, err := file.Stat()
 	if err != nil {
@@ -849,7 +851,9 @@ func storeRestoreToken(statePath string, cfg Config, token string) error {
 		return err
 	}
 	tempPath := file.Name()
-	defer os.Remove(tempPath)
+	defer func() {
+		_ = os.Remove(tempPath)
+	}()
 	if err := file.Chmod(0o600); err != nil {
 		_ = file.Close()
 		return err

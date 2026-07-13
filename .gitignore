@@ -1,4 +1,5 @@
 /result
+/dist/
 __pycache__/
 web/dist/
 web/node_modules/

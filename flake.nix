@@ -239,7 +239,9 @@
 
             packages = [
               go
+              pkgs.golangci-lint
               pkgs.gopls
+              pkgs.goreleaser
               pkgs.gotools
               pkgs.clang-tools
               pkgs.nixfmt

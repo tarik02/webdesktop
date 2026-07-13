@@ -560,8 +560,9 @@ func (b *videoEncoderBranch) Fail(err error) {
 func (b *videoEncoderBranch) Stop() {
 	b.stopOnce.Do(func() {
 		close(b.stop)
+		// Wait for an in-flight emit to return before Stop completes.
 		b.emitMu.Lock()
-		b.emitMu.Unlock()
+		defer b.emitMu.Unlock()
 	})
 }
 
@@ -615,7 +616,7 @@ func (b *videoEncoderBranch) appendTraceFields(
 		zap.Duration(fieldName("appsink_max_emit_duration"), time.Duration(b.trace.maxEmit.Load())),
 	)
 	for _, property := range []string{"in", "out", "dropped", "current-level-buffers"} {
-		if value, err := b.source.Element.GetProperty(property); err == nil {
+		if value, err := b.source.GetProperty(property); err == nil {
 			fields = append(fields, zap.Any(fieldName("appsrc_"+strings.ReplaceAll(property, "-", "_")), value))
 		}
 	}
@@ -861,7 +862,7 @@ func newPersistentVideoPipeline(
 
 	sink.SetMaxBuffers(1)
 	sink.SetWaitOnEOS(false)
-	sink.Element.SetArg("leaky-type", "downstream")
+	sink.SetArg("leaky-type", "downstream")
 	if err := sink.SetProperty("enable-last-sample", false); err != nil {
 		return nil, fmt.Errorf("disable capture appsink last sample: %w", err)
 	}
@@ -1257,7 +1258,7 @@ func (p *persistentVideoPipeline) logTraceSnapshot() {
 		zap.Duration("capture_max_route_duration", time.Duration(p.trace.maxRouteDuration.Load())),
 	}
 	for _, property := range []string{"in", "out", "dropped", "current-level-buffers"} {
-		if value, err := p.sink.Element.GetProperty(property); err == nil {
+		if value, err := p.sink.GetProperty(property); err == nil {
 			fields = append(fields, zap.Any("capture_appsink_"+strings.ReplaceAll(property, "-", "_"), value))
 		}
 	}

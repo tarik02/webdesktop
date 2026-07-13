@@ -1,0 +1,47 @@
+version: 2
+
+project_name: webdesktop
+
+builds:
+  - id: webdesktop
+    main: ./cmd/webdesktop
+    binary: webdesktop
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+    goamd64:
+      - v1
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/tarik02/webdesktop/internal/version.Version={{ .Version }}
+    hooks:
+      pre:
+        - cmd: pnpm install --frozen-lockfile
+          dir: web
+          output: true
+        - cmd: pnpm build
+          dir: web
+          output: true
+
+archives:
+  - ids:
+      - webdesktop
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: true
+    files:
+      - README.md
+      - LICENSE
+      - THIRD_PARTY_NOTICES.md
+      - docs/**
+      - webdesktop.example.yaml
+      - packaging/systemd/webdesktop.service
+      - packaging/applications/io.github.tarik02.webdesktop.desktop
+
+checksum:
+  name_template: checksums.txt
