@@ -21,7 +21,7 @@ type AudioConfig struct {
 	BitrateKbps int
 }
 
-// AudioSample is one encoded Opus frame ready for transport.
+// AudioSample is one encoded Opus frame ready for transport. PTS and Duration define the media timeline; transport does not derive RTP time from wall-clock production.
 type AudioSample struct {
 	Data     []byte
 	PTS      time.Duration

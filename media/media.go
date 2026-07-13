@@ -50,7 +50,7 @@ type Config struct {
 	Tuning  Tuning
 }
 
-// Sample is one encoded video frame ready for transport.
+// Sample is one encoded video frame ready for transport. ProducedAt records encoder latency instrumentation; PTS and Duration define the media timeline.
 type Sample struct {
 	Data       []byte
 	Codec      string
