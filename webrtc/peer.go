@@ -612,13 +612,13 @@ func (p *peer) logClientTrace(request signalRequest) {
 	logger := p.logger.Named("client")
 	switch request.Level.Value {
 	case "debug":
-		logger.Debug("frontend trace", fields...)
+		logger.Debug("client trace", fields...)
 	case "info":
-		logger.Info("frontend trace", fields...)
+		logger.Info("client trace", fields...)
 	case "warn":
-		logger.Warn("frontend trace", fields...)
+		logger.Warn("client trace", fields...)
 	case "error":
-		logger.Error("frontend trace", fields...)
+		logger.Error("client trace", fields...)
 	}
 }
 

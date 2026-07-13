@@ -40,6 +40,7 @@ type Media interface {
 	Quality() media.Quality
 	UpdateQuality(media.Quality) error
 	RequestKeyframe() error
+	SetActive(bool)
 }
 
 // AudioMedia is the optional encoded audio API required by the WebRTC transport.
@@ -193,6 +194,7 @@ func New(
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	source.SetActive(false)
 	return &Service{
 		cfg:              cfg,
 		source:           source,
@@ -335,6 +337,7 @@ func (s *Service) Close() {
 		s.closeDoneClosed = true
 	}
 	s.cancel()
+	s.source.SetActive(false)
 	peers := make([]*peer, 0, len(s.peers))
 	for peer := range s.peers {
 		peers = append(peers, peer)
@@ -460,7 +463,11 @@ func (s *Service) registerPeer(peer *peer) error {
 	if s.closed {
 		return errServiceUnavailable
 	}
+	first := len(s.peers) == 0
 	s.peers[peer] = struct{}{}
+	if first {
+		s.source.SetActive(true)
+	}
 	return nil
 }
 
@@ -476,7 +483,12 @@ func (s *Service) releaseReservation() {
 
 func (s *Service) removePeer(peer *peer) {
 	s.peersMu.Lock()
-	delete(s.peers, peer)
+	if _, ok := s.peers[peer]; ok {
+		delete(s.peers, peer)
+		if len(s.peers) == 0 {
+			s.source.SetActive(false)
+		}
+	}
 	s.peersMu.Unlock()
 }
 

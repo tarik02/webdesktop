@@ -740,6 +740,7 @@ export function App() {
           ref={videoRef}
           data-testid="remote-video"
           className="size-full object-contain"
+          style={{ transform: "scaleY(-1)" }}
           autoPlay
           playsInline
           muted={!audioPlaying}
