@@ -40,8 +40,25 @@ archives:
       - THIRD_PARTY_NOTICES.md
       - docs/**
       - webdesktop.example.yaml
-      - packaging/systemd/webdesktop.service
-      - packaging/applications/io.github.tarik02.webdesktop.desktop
 
 checksum:
   name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore\\(deps\\):"
+
+release:
+  github:
+    owner: tarik02
+    name: webdesktop
+  prerelease: auto
+  mode: append
