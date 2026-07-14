@@ -1,32 +1,46 @@
-name: release
+name: pr binaries
 
 on:
-  push:
-    tags:
-      - "v*"
+  pull_request:
+    branches:
+      - master
+    types:
+      - labeled
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: pr-binaries-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  release:
+  build:
+    name: build binaries
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'build-binaries'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7.0.0
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
+
       - uses: actions/setup-go@v6.5.0
         with:
           go-version-file: go.mod
           cache: true
+
       - uses: pnpm/action-setup@v6.0.9
         with:
           package_json_file: web/package.json
+
       - uses: actions/setup-node@v6.4.0
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
+
       - name: Install native dependencies
         run: |
           sudo apt-get update
@@ -35,10 +49,22 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             pkg-config
-      - uses: goreleaser/goreleaser-action@v7.2.3
+
+      - name: Build snapshot artifacts
+        uses: goreleaser/goreleaser-action@v7.2.3
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --snapshot --clean --skip=publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: webdesktop-pr-binaries
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+          retention-days: 14
