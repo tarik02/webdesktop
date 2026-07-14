@@ -8,7 +8,7 @@ uses Pion for WebRTC. There is no X11 capture path or fallback.
 
 - Runtime-configurable VP8, software H.264, and VA-API H.264 encoder profiles
 - Low-latency newest-frame pipeline with bounded queues
-- Live bitrate, resolution, and frame-rate changes
+- Server-defined quality presets with client-side resolution, frame-rate, and bitrate overrides
 - Optional Opus desktop audio
 - Portal-authorized pointer and keyboard input through libei
 - Bidirectional rich clipboard synchronization through the Clipboard portal

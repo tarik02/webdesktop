@@ -489,12 +489,12 @@ func (s *Service) peerSnapshot() []*peer {
 	return peers
 }
 
-func (s *Service) closePeerForCodecChange(peer *peer, generation uint64) {
+func (s *Service) closePeerForProfileChange(peer *peer, generation uint64) {
 	s.qualityMu.Lock()
 	current := s.qualityGeneration == generation
 	s.qualityMu.Unlock()
 	if current {
-		peer.closeWith(websocket.CloseServiceRestart, "video codec changed")
+		peer.closeWith(websocket.CloseServiceRestart, "video profile changed")
 	}
 }
 

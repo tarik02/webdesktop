@@ -36,8 +36,10 @@ frames only enter the encoder while at least one WebRTC peer is registered.
 
 `pipewiresrc` uses a frame keepalive based on the configured frame rate. This
 resends the latest buffer when the compositor provides damage-driven updates,
-so an idle desktop does not stop the RTP timeline. `videorate` caps each
-encoder branch without manufacturing queued duplicate frames.
+so an idle desktop does not stop the RTP timeline. Each encoder branch
+timestamps its input from its own monotonic pipeline clock, so a PipeWire
+timestamp regression cannot pause `videorate`. `videorate` caps each encoder branch without
+manufacturing queued duplicate frames.
 
 Encoded samples use blocking handoff. Encoded reference chains are not dropped
 between the encoder and peer writers. There is no per-peer video queue or
@@ -45,11 +47,12 @@ packet pacer.
 
 ## Encoder profiles and quality changes
 
-Encoder profiles come from runtime configuration. Each profile contains its
-GStreamer pipeline template, live bitrate properties, quality limits, RTP codec
-capability, packetizer selection, RTCP feedback, and SDP constraints. Adding an
-encoder for an existing supported RTP payloader does not require a codec branch
-in the service.
+Encoder profiles come from runtime configuration. Each profile contains named
+quality options, its GStreamer pipeline template, live bitrate properties,
+quality limits, RTP codec capability, packetizer selection, RTCP feedback, and
+SDP constraints. Each option is a full resolution, frame rate, and bitrate
+tuple. Adding an encoder for an existing supported RTP payloader does not
+require a codec branch in the service.
 
 The built-in VP8 profile uses `vp8enc` with a short rate-control buffer, bounded
 intra frames, and a realtime CPU setting. The software H.264 profile uses
@@ -58,9 +61,11 @@ intra frames, and a realtime CPU setting. The software H.264 profile uses
 streams and advertise the libwebrtc-compatible `42e02a` profile-level
 identifier.
 
-All peers share one encoded stream. A bitrate-only change updates the active
-encoder while it is playing using the profile's configured properties. The
-VA-API profile updates its CPB request and target bitrate together.
+All peers share one encoded stream. Clients select an advertised profile and
+option as a base, then may override resolution, frame rate, and bitrate within
+that profile's limits. A bitrate-only change updates the active encoder using
+the profile's configured properties. The VA-API profile updates its CPB request
+and target bitrate together.
 
 Resolution and frame-rate changes create a candidate encoder branch against
 the current latest-frame slot. The service switches only after the candidate
@@ -70,6 +75,10 @@ active stream unchanged.
 A profile change with different codec metadata needs a new SDP offer and answer.
 The embedded client reconnects after the new encoder becomes active. Profiles
 with identical codec metadata switch without reconnecting.
+
+Profiles configure any display orientation correction through
+`frontend_transform`. The encoder keeps the captured orientation unchanged;
+the browser transforms the video and remaps absolute pointer coordinates.
 
 ## RTP timing and recovery
 

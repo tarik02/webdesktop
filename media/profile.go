@@ -16,18 +16,35 @@ const (
 
 	PropertyTypeInt  = "int"
 	PropertyTypeUint = "uint"
+
+	FrontendTransformNone           = "none"
+	FrontendTransformFlipHorizontal = "flip-horizontal"
+	FrontendTransformFlipVertical   = "flip-vertical"
+	FrontendTransformRotate180      = "rotate-180"
 )
 
 var profileIdentifierPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // EncoderProfile describes an encoder pipeline and its WebRTC codec metadata.
 type EncoderProfile struct {
-	Label          string            `mapstructure:"label" yaml:"label"`
-	Pipeline       string            `mapstructure:"pipeline" yaml:"pipeline"`
-	EncoderElement string            `mapstructure:"encoder_element" yaml:"encoder_element"`
-	Bitrate        []EncoderProperty `mapstructure:"bitrate" yaml:"bitrate"`
-	Codec          RTPCodec          `mapstructure:"codec" yaml:"codec"`
-	Limits         QualityLimits     `mapstructure:"limits" yaml:"limits"`
+	Label             string                   `mapstructure:"label" yaml:"label"`
+	DefaultOption     string                   `mapstructure:"default_option" yaml:"default_option"`
+	Options           map[string]QualityOption `mapstructure:"options" yaml:"options"`
+	FrontendTransform string                   `mapstructure:"frontend_transform" yaml:"frontend_transform"`
+	Pipeline          string                   `mapstructure:"pipeline" yaml:"pipeline"`
+	EncoderElement    string                   `mapstructure:"encoder_element" yaml:"encoder_element"`
+	Bitrate           []EncoderProperty        `mapstructure:"bitrate" yaml:"bitrate"`
+	Codec             RTPCodec                 `mapstructure:"codec" yaml:"codec"`
+	Limits            QualityLimits            `mapstructure:"limits" yaml:"limits"`
+}
+
+// QualityOption is one complete video quality tuple exposed to clients.
+type QualityOption struct {
+	Label       string `mapstructure:"label" yaml:"label" json:"label"`
+	Width       int    `mapstructure:"width" yaml:"width" json:"width"`
+	Height      int    `mapstructure:"height" yaml:"height" json:"height"`
+	Framerate   int    `mapstructure:"framerate" yaml:"framerate" json:"framerate"`
+	BitrateKbps int    `mapstructure:"bitrate_kbps" yaml:"bitrate_kbps" json:"bitrate_kbps"`
 }
 
 // EncoderProperty describes one live encoder property update.
@@ -83,13 +100,29 @@ type profileTemplateData struct {
 }
 
 // Validate checks one configured encoder profile and its templates.
-func (profile EncoderProfile) Validate(name string, quality Quality, tuning Tuning) error {
+func (profile EncoderProfile) Validate(name string, tuning Tuning) error {
 	var errs []error
 	if !profileIdentifierPattern.MatchString(name) {
 		errs = append(errs, fmt.Errorf("video profile name %q must contain lowercase letters, numbers, underscores, or hyphens", name))
 	}
 	if profile.Label == "" {
 		errs = append(errs, fmt.Errorf("video profile %q label is required", name))
+	}
+	if !profileIdentifierPattern.MatchString(profile.DefaultOption) {
+		errs = append(errs, fmt.Errorf("video profile %q default_option is invalid", name))
+	}
+	if len(profile.Options) == 0 {
+		errs = append(errs, fmt.Errorf("video profile %q requires at least one quality option", name))
+	} else if _, exists := profile.Options[profile.DefaultOption]; !exists {
+		errs = append(errs, fmt.Errorf("video profile %q default_option %q is not configured", name, profile.DefaultOption))
+	}
+	switch profile.FrontendTransform {
+	case FrontendTransformNone,
+		FrontendTransformFlipHorizontal,
+		FrontendTransformFlipVertical,
+		FrontendTransformRotate180:
+	default:
+		errs = append(errs, fmt.Errorf("video profile %q frontend_transform must be none, flip-horizontal, flip-vertical, or rotate-180", name))
 	}
 	if profile.Pipeline == "" {
 		errs = append(errs, fmt.Errorf("video profile %q pipeline is required", name))
@@ -101,18 +134,38 @@ func (profile EncoderProfile) Validate(name string, quality Quality, tuning Tuni
 		errs = append(errs, fmt.Errorf("video profile %q requires at least one live bitrate property", name))
 	}
 
-	data := profileTemplateData{
-		Width:            quality.Width,
-		Height:           quality.Height,
-		Framerate:        quality.Framerate,
-		BitrateKbps:      quality.BitrateKbps,
-		Threads:          tuning.Threads,
-		KeyframeInterval: tuning.KeyframeInterval,
-		VP8CPUUsed:       tuning.VP8CPUUsed,
-		prefix:           "profile-validation",
-	}
-	if _, err := renderProfileTemplate(name+" pipeline", profile.Pipeline, data); err != nil {
-		errs = append(errs, err)
+	for optionName, option := range profile.Options {
+		if !profileIdentifierPattern.MatchString(optionName) {
+			errs = append(errs, fmt.Errorf("video profile %q option name %q must contain lowercase letters, numbers, underscores, or hyphens", name, optionName))
+		}
+		if option.Label == "" {
+			errs = append(errs, fmt.Errorf("video profile %q option %q label is required", name, optionName))
+		}
+		quality := option.Quality(name, optionName)
+		if err := validateQualityValues(quality); err != nil {
+			errs = append(errs, fmt.Errorf("video profile %q option %q: %w", name, optionName, err))
+		}
+		if err := profile.Limits.Validate(name, quality); err != nil {
+			errs = append(errs, fmt.Errorf("video profile %q option %q: %w", name, optionName, err))
+		}
+		data := profileTemplateData{
+			Width:            option.Width,
+			Height:           option.Height,
+			Framerate:        option.Framerate,
+			BitrateKbps:      option.BitrateKbps,
+			Threads:          tuning.Threads,
+			KeyframeInterval: tuning.KeyframeInterval,
+			VP8CPUUsed:       tuning.VP8CPUUsed,
+			prefix:           "profile-validation",
+		}
+		if _, err := renderProfileTemplate(name+" option "+optionName+" pipeline", profile.Pipeline, data); err != nil {
+			errs = append(errs, err)
+		}
+		for index, property := range profile.Bitrate {
+			if _, err := property.Render(name, data); err != nil {
+				errs = append(errs, fmt.Errorf("video profile %q option %q bitrate[%d]: %w", name, optionName, index, err))
+			}
+		}
 	}
 	for index, property := range profile.Bitrate {
 		if !profileIdentifierPattern.MatchString(property.Element) {
@@ -120,9 +173,6 @@ func (profile EncoderProfile) Validate(name string, quality Quality, tuning Tuni
 		}
 		if property.Property == "" {
 			errs = append(errs, fmt.Errorf("video profile %q bitrate[%d] property is required", name, index))
-		}
-		if _, err := property.Render(name, data); err != nil {
-			errs = append(errs, fmt.Errorf("video profile %q bitrate[%d]: %w", name, index, err))
 		}
 	}
 	if err := profile.Codec.Validate(name); err != nil {
@@ -142,6 +192,18 @@ func (profile EncoderProfile) Validate(name string, quality Quality, tuning Tuni
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Quality resolves this option into runtime encoder settings.
+func (option QualityOption) Quality(profileName, optionName string) Quality {
+	return Quality{
+		Profile:     profileName,
+		Option:      optionName,
+		Width:       option.Width,
+		Height:      option.Height,
+		Framerate:   option.Framerate,
+		BitrateKbps: option.BitrateKbps,
+	}
 }
 
 // RenderPipeline resolves the profile pipeline for one quality setting.

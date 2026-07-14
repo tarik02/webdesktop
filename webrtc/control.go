@@ -8,7 +8,6 @@ import (
 
 	pion "github.com/pion/webrtc/v4"
 	remoteinput "github.com/tarik02/webdesktop/input"
-	"github.com/tarik02/webdesktop/media"
 	"go.uber.org/zap"
 )
 
@@ -256,15 +255,32 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		return
 	}
 	qualityCurrent := p.service.source.Quality()
-	quality := media.Quality{
-		Profile:     qualityCurrent.Profile,
-		Width:       qualityCurrent.Width,
-		Height:      qualityCurrent.Height,
-		Framerate:   qualityCurrent.Framerate,
-		BitrateKbps: qualityCurrent.BitrateKbps,
-	}
+	quality := qualityCurrent
+	profileName := qualityCurrent.Profile
 	if request.Quality.Value.Profile.Set {
-		quality.Profile = request.Quality.Value.Profile.Value
+		profileName = request.Quality.Value.Profile.Value
+	}
+	profile, exists := p.service.source.Profile(profileName)
+	if !exists {
+		p.service.qualityChangeMu.Unlock()
+		p.writeControlError(channel, request.ID.Value, "quality_update_failed", fmt.Sprintf("video profile %q is not configured", profileName))
+		return
+	}
+	optionName := qualityCurrent.Option
+	if request.Quality.Value.Profile.Set && !request.Quality.Value.Option.Set {
+		optionName = profile.DefaultOption
+	}
+	if request.Quality.Value.Option.Set {
+		optionName = request.Quality.Value.Option.Value
+	}
+	if request.Quality.Value.Profile.Set || request.Quality.Value.Option.Set {
+		option, exists := profile.Options[optionName]
+		if !exists {
+			p.service.qualityChangeMu.Unlock()
+			p.writeControlError(channel, request.ID.Value, "quality_update_failed", fmt.Sprintf("video option %q is not configured for profile %q", optionName, profileName))
+			return
+		}
+		quality = option.Quality(profileName, optionName)
 	}
 	if request.Quality.Value.Width.Set {
 		quality.Width = request.Quality.Value.Width.Value
@@ -280,24 +296,28 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	}
 	err = p.service.source.UpdateQuality(quality)
 	effective := p.service.source.Quality()
-	currentProfile, currentExists := p.service.source.Profile(qualityCurrent.Profile)
+	_, currentExists := p.service.source.Profile(qualityCurrent.Profile)
 	effectiveProfile, effectiveExists := p.service.source.Profile(effective.Profile)
 	if err == nil && (!currentExists || !effectiveExists) {
 		err = errors.New("media profile metadata is unavailable after quality update")
 	}
-	codecChanged := err == nil && currentExists && effectiveExists && !currentProfile.Codec.Compatible(effectiveProfile.Codec)
+	requesterNeedsReconnect := err == nil && effectiveExists && (!p.videoCodec.Compatible(effectiveProfile.Codec) ||
+		p.videoFrontendTransform != effectiveProfile.FrontendTransform)
 	var qualityGeneration uint64
 	var incompatiblePeers []*peer
-	if codecChanged {
+	if err == nil && currentExists && effectiveExists {
+		for _, candidate := range p.service.peerSnapshot() {
+			if candidate != p && (!candidate.videoCodec.Compatible(effectiveProfile.Codec) ||
+				candidate.videoFrontendTransform != effectiveProfile.FrontendTransform) {
+				incompatiblePeers = append(incompatiblePeers, candidate)
+			}
+		}
+	}
+	if requesterNeedsReconnect || len(incompatiblePeers) > 0 {
 		p.service.qualityMu.Lock()
 		p.service.qualityGeneration++
 		qualityGeneration = p.service.qualityGeneration
 		p.service.qualityMu.Unlock()
-		for _, candidate := range p.service.peerSnapshot() {
-			if candidate != p && !candidate.videoCodec.Compatible(effectiveProfile.Codec) {
-				incompatiblePeers = append(incompatiblePeers, candidate)
-			}
-		}
 	}
 	p.service.qualityChangeMu.Unlock()
 	if err != nil {
@@ -312,13 +332,13 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		Quality: qualityResponse(effective),
 	})
 	for _, candidate := range incompatiblePeers {
-		p.service.closePeerForCodecChange(candidate, qualityGeneration)
+		p.service.closePeerForProfileChange(candidate, qualityGeneration)
 	}
 	if !responseWritten {
 		p.Close()
 		return
 	}
-	if codecChanged {
+	if requesterNeedsReconnect {
 		p.Close()
 	}
 }

@@ -38,14 +38,15 @@ type peer struct {
 	conn    *websocket.Conn
 	pc      *pion.PeerConnection
 
-	videoSender  *pion.RTPSender
-	videoTrack   *sampleTrack
-	videoProfile string
-	videoCodec   media.RTPCodec
-	videoSamples videoMailbox
-	audioSender  *pion.RTPSender
-	audioTrack   *sampleTrack
-	audioSamples audioMailbox
+	videoSender            *pion.RTPSender
+	videoTrack             *sampleTrack
+	videoProfile           string
+	videoCodec             media.RTPCodec
+	videoFrontendTransform string
+	videoSamples           videoMailbox
+	audioSender            *pion.RTPSender
+	audioTrack             *sampleTrack
+	audioSamples           audioMailbox
 
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -168,19 +169,20 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 	)
 	peerLogger := s.logger.With(zap.Uint64("peer_id", id))
 	peer := &peer{
-		id:           id,
-		service:      s,
-		logger:       peerLogger,
-		conn:         connection,
-		pc:           peerConnection,
-		videoTrack:   videoTrack,
-		videoProfile: quality.Profile,
-		videoCodec:   profile.Codec,
-		videoSamples: newVideoMailbox(),
-		ctx:          ctx,
-		cancel:       cancel,
-		done:         make(chan struct{}),
-		ownedOpen:    true,
+		id:                     id,
+		service:                s,
+		logger:                 peerLogger,
+		conn:                   connection,
+		pc:                     peerConnection,
+		videoTrack:             videoTrack,
+		videoProfile:           quality.Profile,
+		videoCodec:             profile.Codec,
+		videoFrontendTransform: profile.FrontendTransform,
+		videoSamples:           newVideoMailbox(),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		done:                   make(chan struct{}),
+		ownedOpen:              true,
 	}
 	if err := s.registerPeer(peer); err != nil {
 		s.qualityMu.Unlock()

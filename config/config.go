@@ -63,15 +63,12 @@ type Tracing struct {
 
 // Video contains portal capture and encoding settings.
 type Video struct {
-	Source      string                          `mapstructure:"source" yaml:"source"`
-	CursorMode  string                          `mapstructure:"cursor_mode" yaml:"cursor_mode"`
-	Profile     string                          `mapstructure:"profile" yaml:"profile"`
-	Profiles    map[string]media.EncoderProfile `mapstructure:"profiles" yaml:"profiles"`
-	Width       int                             `mapstructure:"width" yaml:"width"`
-	Height      int                             `mapstructure:"height" yaml:"height"`
-	Framerate   int                             `mapstructure:"framerate" yaml:"framerate"`
-	BitrateKbps int                             `mapstructure:"bitrate_kbps" yaml:"bitrate_kbps"`
-	Tuning      VideoTuning                     `mapstructure:"tuning" yaml:"tuning"`
+	Source     string                          `mapstructure:"source" yaml:"source"`
+	CursorMode string                          `mapstructure:"cursor_mode" yaml:"cursor_mode"`
+	Profile    string                          `mapstructure:"profile" yaml:"profile"`
+	Option     string                          `mapstructure:"option" yaml:"option"`
+	Profiles   map[string]media.EncoderProfile `mapstructure:"profiles" yaml:"profiles"`
+	Tuning     VideoTuning                     `mapstructure:"tuning" yaml:"tuning"`
 }
 
 // VideoTuning contains static encoder settings.
@@ -126,14 +123,11 @@ func Defaults() Config {
 			Format: LogFormatJSON,
 		},
 		Video: Video{
-			Source:      VideoSourceMonitor,
-			CursorMode:  VideoCursorModeEmbedded,
-			Profile:     VideoProfileVP8,
-			Profiles:    DefaultVideoProfiles(),
-			Width:       1920,
-			Height:      1080,
-			Framerate:   30,
-			BitrateKbps: 4000,
+			Source:     VideoSourceMonitor,
+			CursorMode: VideoCursorModeEmbedded,
+			Profile:    VideoProfileVP8,
+			Option:     "balanced",
+			Profiles:   DefaultVideoProfiles(),
 			Tuning: VideoTuning{
 				Threads:          8,
 				KeyframeInterval: 60,
@@ -193,10 +187,45 @@ func DefaultVideoProfiles() map[string]media.EncoderProfile {
 		MaxMacroblocksPerFrame:     8704,
 		MaxMacroblocksPerSecond:    522240,
 	}
+	qualityOptions := func() map[string]media.QualityOption {
+		return map[string]media.QualityOption{
+			"low": {
+				Label:       "720p 30 FPS",
+				Width:       1280,
+				Height:      720,
+				Framerate:   30,
+				BitrateKbps: 2500,
+			},
+			"balanced": {
+				Label:       "1080p 30 FPS",
+				Width:       1920,
+				Height:      1080,
+				Framerate:   30,
+				BitrateKbps: 4000,
+			},
+			"high": {
+				Label:       "1080p 60 FPS",
+				Width:       1920,
+				Height:      1080,
+				Framerate:   60,
+				BitrateKbps: 8000,
+			},
+			"maximum": {
+				Label:       "1080p 60 FPS",
+				Width:       1920,
+				Height:      1080,
+				Framerate:   60,
+				BitrateKbps: 10000,
+			},
+		}
+	}
 	return map[string]media.EncoderProfile{
 		VideoProfileVP8: {
-			Label:          "VP8",
-			EncoderElement: "encoder",
+			Label:             "VP8",
+			DefaultOption:     "balanced",
+			Options:           qualityOptions(),
+			FrontendTransform: media.FrontendTransformNone,
+			EncoderElement:    "encoder",
 			Pipeline: `videoconvert !
 videoscale method=nearest-neighbour !
 video/x-raw,format=I420,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
@@ -238,8 +267,11 @@ video/x-vp8`,
 			Limits: media.QualityLimits{MaxBitrateKbps: 2147483},
 		},
 		VideoProfileH264VAAPI: {
-			Label:          "H.264 (VA-API)",
-			EncoderElement: "encoder",
+			Label:             "H.264 (VA-API)",
+			DefaultOption:     "balanced",
+			Options:           qualityOptions(),
+			FrontendTransform: media.FrontendTransformNone,
+			EncoderElement:    "encoder",
 			Pipeline: `vapostproc name={{ element "postproc" }} qos=true scale-method=fast !
 video/x-raw(memory:VAMemory),format=NV12,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
 vah264enc name={{ element "encoder" }}
@@ -256,7 +288,7 @@ vah264enc name={{ element "encoder" }}
   rate-control=cbr
   cc-insert=false !
 h264parse name={{ element "parser" }} config-interval=-1 !
-video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)4.2`,
+video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline`,
 			Bitrate: []media.EncoderProperty{
 				{
 					Element:  "encoder",
@@ -275,8 +307,11 @@ video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline
 			Limits: h264Limits,
 		},
 		VideoProfileH264Software: {
-			Label:          "H.264 (software)",
-			EncoderElement: "encoder",
+			Label:             "H.264 (software)",
+			DefaultOption:     "balanced",
+			Options:           qualityOptions(),
+			FrontendTransform: media.FrontendTransformNone,
+			EncoderElement:    "encoder",
 			Pipeline: `videoconvert !
 videoscale method=nearest-neighbour !
 video/x-raw,format=I420,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
@@ -347,15 +382,15 @@ func (cfg Config) Validate() error {
 		errs = append(errs, errors.New("video.cursor_mode must be hidden or embedded"))
 	}
 
+	selectedQuality := media.Quality{Profile: cfg.Video.Profile, Option: cfg.Video.Option}
+	if profile, exists := cfg.Video.Profiles[cfg.Video.Profile]; exists {
+		if option, exists := profile.Options[cfg.Video.Option]; exists {
+			selectedQuality = option.Quality(cfg.Video.Profile, cfg.Video.Option)
+		}
+	}
 	errs = append(errs, media.ValidateProfiles(
 		cfg.Video.Profiles,
-		media.Quality{
-			Profile:     cfg.Video.Profile,
-			Width:       cfg.Video.Width,
-			Height:      cfg.Video.Height,
-			Framerate:   cfg.Video.Framerate,
-			BitrateKbps: cfg.Video.BitrateKbps,
-		},
+		selectedQuality,
 		media.Tuning{
 			Threads:          cfg.Video.Tuning.Threads,
 			KeyframeInterval: cfg.Video.Tuning.KeyframeInterval,

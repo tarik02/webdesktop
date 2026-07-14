@@ -19,7 +19,7 @@ import (
 
 const (
 	signalingVersion = 1
-	controlVersion   = 2
+	controlVersion   = 3
 	inputVersion     = 1
 
 	signalTypeOffer        = "offer"
@@ -201,6 +201,7 @@ type signalResponse struct {
 
 type qualityPatch struct {
 	Profile     optionalString `json:"profile"`
+	Option      optionalString `json:"option"`
 	Width       optionalInt    `json:"width"`
 	Height      optionalInt    `json:"height"`
 	Framerate   optionalInt    `json:"framerate"`
@@ -241,6 +242,7 @@ type controlRequest struct {
 
 type controlQuality struct {
 	Profile     string `json:"profile"`
+	Option      string `json:"option"`
 	Width       int    `json:"width"`
 	Height      int    `json:"height"`
 	Framerate   int    `json:"framerate"`
@@ -341,6 +343,7 @@ func decodeInputRequest(data []byte) (inputRequest, error) {
 func qualityResponse(quality media.Quality) *controlQuality {
 	return &controlQuality{
 		Profile:     quality.Profile,
+		Option:      quality.Option,
 		Width:       quality.Width,
 		Height:      quality.Height,
 		Framerate:   quality.Framerate,
@@ -468,7 +471,14 @@ func validateControlRequest(request controlRequest) *protocolError {
 			Message: "quality profile must not be empty",
 		}
 	}
+	if request.Quality.Value.Option.Set && request.Quality.Value.Option.Value == "" {
+		return &protocolError{
+			Code:    "invalid_quality",
+			Message: "quality option must not be empty",
+		}
+	}
 	if !request.Quality.Value.Profile.Set &&
+		!request.Quality.Value.Option.Set &&
 		!request.Quality.Value.Width.Set &&
 		!request.Quality.Value.Height.Set &&
 		!request.Quality.Value.Framerate.Set &&
