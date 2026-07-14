@@ -1,0 +1,28 @@
+name: build
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: nix flake
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: cachix/install-nix-action@v31.10.7
+
+      - name: Validate GoReleaser configuration
+        run: nix develop -c goreleaser check
+
+      - name: Build and check
+        run: nix flake check --print-build-logs

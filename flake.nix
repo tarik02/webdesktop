@@ -4,6 +4,9 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    gomod2nix.url = "github:nix-community/gomod2nix/v1.7.0";
+    gomod2nix.inputs.nixpkgs.follows = "nixpkgs";
+    gomod2nix.inputs.flake-utils.follows = "flake-utils";
   };
 
   outputs =
@@ -11,6 +14,7 @@
       self,
       nixpkgs,
       flake-utils,
+      gomod2nix,
     }:
     flake-utils.lib.eachSystem
       [
@@ -23,7 +27,7 @@
           pkgs = nixpkgs.legacyPackages.${system};
           lib = pkgs.lib;
           go = pkgs.go_1_26;
-          buildGoModule = pkgs.buildGoModule.override { inherit go; };
+          gomod2nixPkgs = gomod2nix.legacyPackages.${system};
           nodejs = pkgs.nodejs_24;
           pnpm = pkgs.pnpm_11.override { nodejs-slim = pkgs.nodejs-slim_24; };
           version = self.shortRev or self.dirtyShortRev or "dev";
@@ -63,7 +67,7 @@
                 ;
               inherit pnpm;
               fetcherVersion = 4;
-              hash = "sha256-RzyqL1hdpQixbE5xwopZaT2fQRhjYNxMHpXy12xrPEg=";
+              hash = "sha256-griquo6MGcIllLqRLB7fbEwYZoX+dwjvZdWjT9YQFOQ=";
             };
 
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
@@ -108,14 +112,18 @@
             pkgs.gst_all_1.gst-plugins-base
             pkgs.libei
           ];
-          webdesktop = buildGoModule {
+          webdesktop = gomod2nixPkgs.buildGoApplication {
             pname = "webdesktop";
             inherit version;
 
             src = sourceWithFrontend;
-            vendorHash = "sha256-x6H1qbLoOzRzpsS3yPQli8I7uUzQ58omr5oXzWxfTtI=";
+            pwd = sourceWithFrontend;
+            modules = ./gomod2nix.toml;
+            modRoot = ".";
             subPackages = [ "cmd/webdesktop" ];
             doCheck = false;
+
+            inherit go;
 
             nativeBuildInputs = mediaNativeBuildInputs ++ [ pkgs.makeWrapper ];
             buildInputs = mediaBuildInputs;
@@ -171,14 +179,17 @@
             package = webdesktop;
             frontend = frontend;
 
-            vet = buildGoModule {
+            vet = gomod2nixPkgs.buildGoApplication {
               pname = "webdesktop-vet";
               inherit version;
 
               src = sourceWithFrontend;
-              vendorHash = "sha256-x6H1qbLoOzRzpsS3yPQli8I7uUzQ58omr5oXzWxfTtI=";
+              pwd = sourceWithFrontend;
+              modules = ./gomod2nix.toml;
+              modRoot = ".";
               doCheck = false;
 
+              inherit go;
               nativeBuildInputs = mediaNativeBuildInputs;
               buildInputs = mediaBuildInputs;
 
@@ -244,6 +255,7 @@
               pkgs.goreleaser
               pkgs.gotools
               pkgs.clang-tools
+              gomod2nixPkgs.gomod2nix
               pkgs.nixfmt
               nodejs
               pnpm
