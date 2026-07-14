@@ -167,13 +167,12 @@ func newVideoEncoderBranch(
 		"name=" + namePrefix + "-appsrc",
 		"is-live=true",
 		"format=time",
-		"do-timestamp=false",
+		"do-timestamp=true",
 		"block=false",
 		"max-buffers=1",
 		"max-bytes=0",
 		"max-time=0",
 		"leaky-type=downstream",
-		"handle-segment-change=true",
 		"emit-signals=false",
 		"!",
 		strings.Join(ratePath, " "),
@@ -355,8 +354,23 @@ func (b *videoEncoderBranch) pumpInput(samples *videoSampleSlot) {
 			}
 		}
 
-		flow := b.source.PushSample(sample)
+		// Keep encoder timing branch-local: forwarding a regressed PipeWire PTS can stall videorate.
+		branchSample := sample.Copy()
 		sample.Unref()
+		buffer := branchSample.GetBuffer()
+		runtime.SetFinalizer(buffer, nil)
+		branchBuffer := buffer.CopyRegion(
+			gst.BufferCopyBufferFlags|gst.BufferCopyMeta|gst.BufferCopyMemory,
+			0,
+			-1,
+		)
+		buffer.Unref()
+		runtime.SetFinalizer(branchBuffer, nil)
+		branchSample.SetBuffer(branchBuffer)
+		branchBuffer.Unref()
+		flow := b.source.PushSample(branchSample)
+		runtime.SetFinalizer(branchSample, nil)
+		branchSample.Unref()
 		sequence = nextSequence
 		if flow == gst.FlowOK {
 			continue
@@ -737,7 +751,7 @@ func newPersistentVideoPipeline(
 			err = errors.Join(err, stream.Close())
 		}
 	}()
-	if err := profile.Validate(quality.Profile, quality, tuning); err != nil {
+	if err := profile.Validate(quality.Profile, tuning); err != nil {
 		return nil, err
 	}
 

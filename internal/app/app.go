@@ -31,6 +31,15 @@ type App struct {
 
 // New constructs the application wiring.
 func New(cfg config.Config) (*App, error) {
+	selectedProfile, exists := cfg.Video.Profiles[cfg.Video.Profile]
+	if !exists {
+		return nil, fmt.Errorf("video profile %q is not configured", cfg.Video.Profile)
+	}
+	selectedOption, exists := selectedProfile.Options[cfg.Video.Option]
+	if !exists {
+		return nil, fmt.Errorf("video option %q is not configured for profile %q", cfg.Video.Option, cfg.Video.Profile)
+	}
+
 	logger, err := logging.New(cfg.Logging)
 	if err != nil {
 		return nil, err
@@ -64,13 +73,7 @@ func New(cfg config.Config) (*App, error) {
 	mediaService, err := media.New(media.Config{
 		Capture:  portalConfig,
 		Profiles: cfg.Video.Profiles,
-		Quality: media.Quality{
-			Profile:     cfg.Video.Profile,
-			Width:       cfg.Video.Width,
-			Height:      cfg.Video.Height,
-			Framerate:   cfg.Video.Framerate,
-			BitrateKbps: cfg.Video.BitrateKbps,
-		},
+		Quality:  selectedOption.Quality(cfg.Video.Profile, cfg.Video.Option),
 		Tuning: media.Tuning{
 			Threads:          cfg.Video.Tuning.Threads,
 			KeyframeInterval: cfg.Video.Tuning.KeyframeInterval,
@@ -124,19 +127,25 @@ func New(cfg config.Config) (*App, error) {
 	}
 
 	type browserVideoProfile struct {
-		Label string `json:"label"`
-		Codec struct {
+		Label             string `json:"label"`
+		DefaultOption     string `json:"default_option"`
+		FrontendTransform string `json:"frontend_transform"`
+		Codec             struct {
 			ID          string `json:"id"`
 			MimeType    string `json:"mime_type"`
 			SDPFmtpLine string `json:"sdp_fmtp_line"`
 		} `json:"codec"`
-		Limits media.QualityLimits `json:"limits"`
+		Options map[string]media.QualityOption `json:"options"`
+		Limits  media.QualityLimits            `json:"limits"`
 	}
 	browserProfiles := make(map[string]browserVideoProfile, len(cfg.Video.Profiles))
 	for name, profile := range cfg.Video.Profiles {
 		entry := browserVideoProfile{
-			Label:  profile.Label,
-			Limits: profile.Limits,
+			Label:             profile.Label,
+			DefaultOption:     profile.DefaultOption,
+			FrontendTransform: profile.FrontendTransform,
+			Options:           profile.Options,
+			Limits:            profile.Limits,
 		}
 		entry.Codec.ID = profile.Codec.ID
 		entry.Codec.MimeType = profile.Codec.MimeType
@@ -166,7 +175,7 @@ func New(cfg config.Config) (*App, error) {
 					Enabled bool `json:"enabled"`
 				} `json:"clipboard"`
 			}{
-				Version:       2,
+				Version:       3,
 				SignalingPath: cfg.WebRTC.SignalingPath,
 				Video:         mediaService.Quality(),
 				VideoProfiles: browserProfiles,

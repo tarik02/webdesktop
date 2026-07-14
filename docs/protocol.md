@@ -1,6 +1,6 @@
 # Protocol
 
-Signaling uses protocol version 1, control uses version 2, and input and
+Signaling uses protocol version 1, control uses version 3, and input and
 clipboard messages use version 1. The client creates these WebRTC data channels:
 
 - `control`, reliable and ordered
@@ -106,11 +106,12 @@ caller-selected ID.
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "id": "quality-42",
   "type": "video.quality.set",
   "quality": {
     "profile": "h264-software",
+    "option": "high",
     "width": 1920,
     "height": 1080,
     "framerate": 60,
@@ -119,19 +120,23 @@ caller-selected ID.
 }
 ```
 
-Quality fields are optional and merge with the current settings. At least one
-field is required.
+The profile and option select a configured base. Width, height, frame rate, and
+bitrate override that base and must satisfy the selected profile's limits. All
+fields are optional, but at least one is required. An option without a profile
+is resolved within the active profile. A profile without an option selects that
+profile's configured default option.
 
 Successful response:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "id": "quality-42",
   "type": "video.quality.set.result",
   "ok": true,
   "quality": {
     "profile": "h264-software",
+    "option": "high",
     "width": 1920,
     "height": 1080,
     "framerate": 60,
@@ -144,7 +149,7 @@ Errors preserve the request ID:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "id": "quality-42",
   "type": "error",
   "ok": false,
@@ -168,7 +173,7 @@ Acquire:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "id": "input-1",
   "type": "input.acquire"
 }
@@ -178,7 +183,7 @@ Successful response:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "id": "input-1",
   "type": "input.acquire.result",
   "ok": true,
@@ -193,7 +198,7 @@ Release:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "id": "input-2",
   "type": "input.release"
 }

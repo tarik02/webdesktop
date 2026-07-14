@@ -36,7 +36,6 @@ import {
 import { evdevKeycode } from "#/lib/keyboard.ts";
 import {
   clipboardMIMESchema,
-  minimumVideoBitrateKbps,
   serverConfigSchema,
   type Quality,
   type ClipboardFormat,
@@ -473,17 +472,13 @@ export function App() {
       if (!currentProfile || !nextProfile) {
         throw new Error("selected video profile is unavailable");
       }
-      const codecChanged = currentProfile.codec.id !== nextProfile.codec.id;
-      const nextQuality = await connectionRef.current.setQuality({
-        ...(quality.profile === appliedQuality.profile ? {} : { profile: quality.profile }),
-        width: quality.width,
-        height: quality.height,
-        framerate: quality.framerate,
-        bitrate_kbps: quality.bitrate_kbps,
-      });
+      const clientProfileChanged =
+        currentProfile.codec.id !== nextProfile.codec.id ||
+        currentProfile.frontend_transform !== nextProfile.frontend_transform;
+      const nextQuality = await connectionRef.current.setQuality(quality);
       setQualityOpen(false);
       setConfig((current) => (current ? { ...current, video: nextQuality } : current));
-      if (codecChanged) {
+      if (clientProfileChanged) {
         await reconnect();
       }
     } catch (cause) {
@@ -510,9 +505,12 @@ export function App() {
     ) {
       return null;
     }
+    const x = Math.min(1, Math.max(0, (event.clientX - left) / width));
+    const y = Math.min(1, Math.max(0, (event.clientY - top) / height));
+    const transform = appliedProfile?.frontend_transform;
     return {
-      x: Math.min(1, Math.max(0, (event.clientX - left) / width)),
-      y: Math.min(1, Math.max(0, (event.clientY - top) / height)),
+      x: transform === "flip-horizontal" || transform === "rotate-180" ? 1 - x : x,
+      y: transform === "flip-vertical" || transform === "rotate-180" ? 1 - y : y,
     };
   };
 
@@ -706,8 +704,26 @@ export function App() {
       )
     : [];
   const selectedProfile = config && quality ? config.video_profiles[quality.profile] : null;
+  const qualityOptions = selectedProfile
+    ? Object.entries(selectedProfile.options).sort(
+        (left, right) =>
+          left[1].width * left[1].height - right[1].width * right[1].height ||
+          left[1].framerate - right[1].framerate ||
+          left[1].bitrate_kbps - right[1].bitrate_kbps ||
+          left[1].label.localeCompare(right[1].label),
+      )
+    : [];
   const appliedProfile =
     config && appliedQuality ? config.video_profiles[appliedQuality.profile] : null;
+  const videoTransform =
+    appliedProfile?.frontend_transform === "flip-horizontal"
+      ? "scaleX(-1)"
+      : appliedProfile?.frontend_transform === "flip-vertical"
+        ? "scaleY(-1)"
+        : appliedProfile?.frontend_transform === "rotate-180"
+          ? "rotate(180deg)"
+          : "none";
+
   const statusLabel =
     connectionState.phase === "connecting"
       ? connectionState.detail
@@ -751,7 +767,7 @@ export function App() {
           ref={videoRef}
           data-testid="remote-video"
           className="size-full object-contain"
-          style={{ transform: "scaleY(-1)" }}
+          style={{ transform: videoTransform }}
           autoPlay
           playsInline
           muted={!audioPlaying}
@@ -836,7 +852,7 @@ export function App() {
             <PopoverContent className="w-[min(22rem,calc(100vw-1.5rem))]" align="end" side="bottom">
               <form id="quality-form" onSubmit={(event) => void applyQuality(event)}>
                 <FieldGroup>
-                  <FieldSet disabled={!connected || !quality}>
+                  <FieldSet className="grid grid-cols-2 gap-3" disabled={!connected || !quality}>
                     <Field>
                       <FieldLabel htmlFor="quality-profile">Encoder</FieldLabel>
                       <NativeSelect
@@ -845,8 +861,17 @@ export function App() {
                         value={quality?.profile ?? ""}
                         onChange={(event) => {
                           const profile = event.currentTarget.value;
-                          if (config?.video_profiles[profile]) {
-                            setQuality((current) => (current ? { ...current, profile } : current));
+                          const nextProfile = config?.video_profiles[profile];
+                          const option = nextProfile?.options[nextProfile.default_option];
+                          if (nextProfile && option) {
+                            setQuality({
+                              profile,
+                              option: nextProfile.default_option,
+                              width: option.width,
+                              height: option.height,
+                              framerate: option.framerate,
+                              bitrate_kbps: option.bitrate_kbps,
+                            });
                           }
                         }}
                       >
@@ -857,76 +882,131 @@ export function App() {
                         ))}
                       </NativeSelect>
                     </Field>
-                    <FieldGroup className="grid grid-cols-2 gap-3">
-                      <Field>
-                        <FieldLabel htmlFor="quality-width">Width</FieldLabel>
-                        <Input
-                          id="quality-width"
-                          type="number"
-                          min={320}
-                          max={7680}
-                          step={2}
-                          value={quality?.width ?? ""}
-                          onChange={(event) => {
-                            const width = event.currentTarget.valueAsNumber;
-                            setQuality((current) => (current ? { ...current, width } : current));
-                          }}
-                        />
-                      </Field>
-                      <Field>
-                        <FieldLabel htmlFor="quality-height">Height</FieldLabel>
-                        <Input
-                          id="quality-height"
-                          type="number"
-                          min={240}
-                          max={4320}
-                          step={2}
-                          value={quality?.height ?? ""}
-                          onChange={(event) => {
-                            const height = event.currentTarget.valueAsNumber;
-                            setQuality((current) => (current ? { ...current, height } : current));
-                          }}
-                        />
-                      </Field>
-                      <Field>
-                        <FieldLabel htmlFor="quality-framerate">Frame rate</FieldLabel>
-                        <Input
-                          id="quality-framerate"
-                          type="number"
-                          min={1}
-                          max={120}
-                          value={quality?.framerate ?? ""}
-                          onChange={(event) => {
-                            const framerate = event.currentTarget.valueAsNumber;
-                            setQuality((current) =>
-                              current ? { ...current, framerate } : current,
-                            );
-                          }}
-                        />
-                      </Field>
-                      <Field>
-                        <FieldLabel htmlFor="quality-bitrate">Bitrate Kbit/s</FieldLabel>
-                        <Input
-                          id="quality-bitrate"
-                          type="number"
-                          min={minimumVideoBitrateKbps}
-                          max={
-                            selectedProfile && selectedProfile.limits.max_bitrate_kbps > 0
-                              ? selectedProfile.limits.max_bitrate_kbps
-                              : undefined
+                    <Field>
+                      <FieldLabel htmlFor="quality-option">Quality</FieldLabel>
+                      <NativeSelect
+                        id="quality-option"
+                        className="w-full"
+                        value={quality?.option ?? ""}
+                        onChange={(event) => {
+                          const optionName = event.currentTarget.value;
+                          const option = selectedProfile?.options[optionName];
+                          if (quality && option) {
+                            setQuality({
+                              ...quality,
+                              option: optionName,
+                              width: option.width,
+                              height: option.height,
+                              framerate: option.framerate,
+                              bitrate_kbps: option.bitrate_kbps,
+                            });
                           }
-                          value={quality?.bitrate_kbps ?? ""}
-                          onChange={(event) => {
-                            const bitrate_kbps = event.currentTarget.valueAsNumber;
-                            setQuality((current) =>
-                              current ? { ...current, bitrate_kbps } : current,
-                            );
-                          }}
-                        />
-                      </Field>
-                    </FieldGroup>
+                        }}
+                      >
+                        {qualityOptions.map(([name, option]) => (
+                          <NativeSelectOption key={name} value={name}>
+                            {option.label} · {option.width}×{option.height} · {option.framerate} FPS
+                            · {option.bitrate_kbps} Kbit/s
+                          </NativeSelectOption>
+                        ))}
+                      </NativeSelect>
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="quality-width">Width</FieldLabel>
+                      <Input
+                        id="quality-width"
+                        type="number"
+                        inputMode="numeric"
+                        min={320}
+                        max={7680}
+                        step={2}
+                        required
+                        value={quality?.width ?? ""}
+                        onChange={(event) => {
+                          if (quality && event.currentTarget.value !== "") {
+                            setQuality({ ...quality, width: event.currentTarget.valueAsNumber });
+                          }
+                        }}
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="quality-height">Height</FieldLabel>
+                      <Input
+                        id="quality-height"
+                        type="number"
+                        inputMode="numeric"
+                        min={240}
+                        max={4320}
+                        step={2}
+                        required
+                        value={quality?.height ?? ""}
+                        onChange={(event) => {
+                          if (quality && event.currentTarget.value !== "") {
+                            setQuality({ ...quality, height: event.currentTarget.valueAsNumber });
+                          }
+                        }}
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="quality-framerate">FPS</FieldLabel>
+                      <Input
+                        id="quality-framerate"
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        max={120}
+                        step={1}
+                        required
+                        value={quality?.framerate ?? ""}
+                        onChange={(event) => {
+                          if (quality && event.currentTarget.value !== "") {
+                            setQuality({
+                              ...quality,
+                              framerate: event.currentTarget.valueAsNumber,
+                            });
+                          }
+                        }}
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="quality-bitrate">Bitrate Kbit/s</FieldLabel>
+                      <Input
+                        id="quality-bitrate"
+                        type="number"
+                        inputMode="numeric"
+                        min={100}
+                        max={
+                          selectedProfile && selectedProfile.limits.max_bitrate_kbps > 0
+                            ? selectedProfile.limits.max_bitrate_kbps
+                            : undefined
+                        }
+                        step={100}
+                        required
+                        value={quality?.bitrate_kbps ?? ""}
+                        onChange={(event) => {
+                          if (quality && event.currentTarget.value !== "") {
+                            setQuality({
+                              ...quality,
+                              bitrate_kbps: event.currentTarget.valueAsNumber,
+                            });
+                          }
+                        }}
+                      />
+                    </Field>
                   </FieldSet>
-                  <Button type="submit" disabled={!connected || !quality}>
+                  <Button
+                    type="submit"
+                    disabled={
+                      !connected ||
+                      !quality ||
+                      (quality.profile === appliedQuality?.profile &&
+                        quality.option === appliedQuality.option &&
+                        quality.width === appliedQuality.width &&
+                        quality.height === appliedQuality.height &&
+                        quality.framerate === appliedQuality.framerate &&
+                        quality.bitrate_kbps === appliedQuality.bitrate_kbps)
+                    }
+                  >
                     Apply quality
                   </Button>
                 </FieldGroup>

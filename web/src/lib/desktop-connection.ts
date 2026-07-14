@@ -157,6 +157,7 @@ export class DesktopConnection {
   ) {
     this.trace("info", "client.created", {
       profile: config.video.profile,
+      option: config.video.option,
       audio_enabled: String(config.audio.enabled),
       input_enabled: String(config.input.enabled),
       visibility: document.visibilityState,
@@ -225,6 +226,7 @@ export class DesktopConnection {
     this.connectStartedAt = performance.now();
     this.trace("info", "connect.start", {
       profile: this.config.video.profile,
+      option: this.config.video.option,
       audio_enabled: String(this.config.audio.enabled),
     });
     this.callbacks.onState({ phase: "connecting", detail: "opening signaling" });
@@ -531,7 +533,7 @@ export class DesktopConnection {
     let response: ControlResponse;
     try {
       response = await this.requestControl({
-        version: 2,
+        version: 3,
         id: this.requestID("input"),
         type: "input.acquire",
       });
@@ -585,7 +587,7 @@ export class DesktopConnection {
       return;
     }
     const response = await this.requestControl({
-      version: 2,
+      version: 3,
       id: this.requestID("input"),
       type: "input.release",
     });
@@ -601,16 +603,13 @@ export class DesktopConnection {
 
   async setQuality(quality: QualityPatch) {
     this.trace("info", "quality.set.start", {
-      profile: quality.profile ?? this.config.video.profile,
-      width: quality.width === undefined ? "unchanged" : String(quality.width),
-      height: quality.height === undefined ? "unchanged" : String(quality.height),
-      framerate: quality.framerate === undefined ? "unchanged" : String(quality.framerate),
-      bitrate_kbps: quality.bitrate_kbps === undefined ? "unchanged" : String(quality.bitrate_kbps),
+      profile: quality.profile,
+      option: quality.option,
     });
     let response: ControlResponse;
     try {
       response = await this.requestControl({
-        version: 2,
+        version: 3,
         id: this.requestID("quality"),
         type: "video.quality.set",
         quality,
@@ -634,6 +633,7 @@ export class DesktopConnection {
     this.callbacks.onQuality(response.quality);
     this.trace("info", "quality.set.complete", {
       profile: response.quality.profile,
+      option: response.quality.option,
       width: String(response.quality.width),
       height: String(response.quality.height),
       framerate: String(response.quality.framerate),
@@ -1119,7 +1119,7 @@ export class DesktopConnection {
   }
 
   private requestControl(message: {
-    version: 2;
+    version: 3;
     id: string;
     type: "input.acquire" | "input.release" | "video.quality.set";
     quality?: QualityPatch;

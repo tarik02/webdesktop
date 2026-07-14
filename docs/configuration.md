@@ -36,10 +36,7 @@ The complete default file is [webdesktop.example.yaml](../webdesktop.example.yam
 | `video.source` | `monitor` | Only monitor capture is implemented |
 | `video.cursor_mode` | `embedded` | `embedded` or `hidden` |
 | `video.profile` | `vp8` | Selected key from `video.profiles` |
-| `video.width` | `1920` | Even value from 320 through 7680 |
-| `video.height` | `1080` | Even value from 240 through 4320 |
-| `video.framerate` | `30` | 1 through 120 |
-| `video.bitrate_kbps` | `4000` | At least 100 |
+| `video.option` | `balanced` | Selected named option from the active profile |
 | `video.tuning.threads` | `8` | Encoder threads, 1 through 64 |
 | `video.tuning.keyframe_interval` | `60` | Frames, 1 through 600 |
 | `video.tuning.vp8_cpu_used` | `16` | VP8 speed setting, 0 through 16 |
@@ -50,6 +47,8 @@ The built-in profiles are:
 - `vp8`, software VP8 with `vp8enc`
 - `h264-software`, software H.264 with `x264enc`
 - `h264-vaapi`, VA-API H.264 with `vah264enc`
+
+Defining `video.profiles` replaces the built-in profile map.
 
 VP8 remains the default. Both H.264 profiles produce constrained-baseline Level
 4.2 byte streams and use the same WebRTC codec metadata. Their quality must stay
@@ -63,12 +62,14 @@ within all of these limits:
 Macroblock dimensions round width and height up to multiples of 16.
 1920x1080 at 60 fps fits Level 4.2.
 
-Bitrate changes apply the selected profile's `bitrate` properties to the active
-encoder. Profile, resolution, and frame-rate changes start a replacement
-encoder and switch after its first keyframe. Switching between the two H.264
-profiles keeps the existing peer connection because their codec metadata is
-identical. Switching between H.264 and VP8 requires a new SDP exchange, so the
-embedded client reconnects.
+Clients select a profile and named option as a base, then may override its
+resolution, frame rate, and bitrate. The server checks the effective values
+against generic bounds and the profile's limits. A bitrate-only change updates
+the active encoder through the profile's configured properties. Other changes
+start a replacement encoder and switch after its first keyframe. Switching
+between the two H.264 profiles keeps the existing peer connection because their
+codec metadata is identical. Switching between H.264 and VP8 requires a new SDP
+exchange, so the embedded client reconnects.
 
 ### Encoder profile definitions
 
@@ -77,6 +78,9 @@ Each `video.profiles` entry contains:
 | Field | Purpose |
 | --- | --- |
 | `label` | Browser UI label |
+| `default_option` | Option used when a client changes profile without naming an option |
+| `frontend_transform` | Browser transform: `none`, `flip-horizontal`, `flip-vertical`, or `rotate-180` |
+| `options` | Named complete quality tuples with `label`, `width`, `height`, `framerate`, and `bitrate_kbps` |
 | `pipeline` | GStreamer pipeline fragment between `videorate` and `appsink` |
 | `encoder_element` | Named element used for encoder tracing |
 | `bitrate` | Ordered live property updates with `element`, `property`, `type`, and templated `value` |

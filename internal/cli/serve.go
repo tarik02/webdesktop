@@ -50,10 +50,7 @@ func newServeCommand() *cobra.Command {
 	flags.String("video-source", defaults.Video.Source, "portal video source (monitor)")
 	flags.String("video-cursor-mode", defaults.Video.CursorMode, "captured cursor mode (hidden or embedded)")
 	flags.String("video-profile", defaults.Video.Profile, "video encoder profile")
-	flags.Int("video-width", defaults.Video.Width, "encoded video width")
-	flags.Int("video-height", defaults.Video.Height, "encoded video height")
-	flags.Int("video-framerate", defaults.Video.Framerate, "encoded video frames per second")
-	flags.Int("video-bitrate-kbps", defaults.Video.BitrateKbps, "encoded video bitrate in Kbit/s")
+	flags.String("video-option", defaults.Video.Option, "named video quality option")
 	flags.Int("video-encoder-threads", defaults.Video.Tuning.Threads, "VP8 encoder thread count")
 	flags.Int("video-keyframe-interval", defaults.Video.Tuning.KeyframeInterval, "maximum frames between keyframes")
 	flags.Int("video-vp8-cpu-used", defaults.Video.Tuning.VP8CPUUsed, "VP8 speed setting from 0 to 16")
@@ -94,11 +91,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("video.source", defaults.Video.Source)
 	v.SetDefault("video.cursor_mode", defaults.Video.CursorMode)
 	v.SetDefault("video.profile", defaults.Video.Profile)
-	v.SetDefault("video.profiles", defaults.Video.Profiles)
-	v.SetDefault("video.width", defaults.Video.Width)
-	v.SetDefault("video.height", defaults.Video.Height)
-	v.SetDefault("video.framerate", defaults.Video.Framerate)
-	v.SetDefault("video.bitrate_kbps", defaults.Video.BitrateKbps)
+	v.SetDefault("video.option", defaults.Video.Option)
 	v.SetDefault("video.tuning.threads", defaults.Video.Tuning.Threads)
 	v.SetDefault("video.tuning.keyframe_interval", defaults.Video.Tuning.KeyframeInterval)
 	v.SetDefault("video.tuning.vp8_cpu_used", defaults.Video.Tuning.VP8CPUUsed)
@@ -129,10 +122,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video.source",
 		"video.cursor_mode",
 		"video.profile",
-		"video.width",
-		"video.height",
-		"video.framerate",
-		"video.bitrate_kbps",
+		"video.option",
 		"video.tuning.threads",
 		"video.tuning.keyframe_interval",
 		"video.tuning.vp8_cpu_used",
@@ -168,10 +158,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"video-source":            "video.source",
 		"video-cursor-mode":       "video.cursor_mode",
 		"video-profile":           "video.profile",
-		"video-width":             "video.width",
-		"video-height":            "video.height",
-		"video-framerate":         "video.framerate",
-		"video-bitrate-kbps":      "video.bitrate_kbps",
+		"video-option":            "video.option",
 		"video-encoder-threads":   "video.tuning.threads",
 		"video-keyframe-interval": "video.tuning.keyframe_interval",
 		"video-vp8-cpu-used":      "video.tuning.vp8_cpu_used",
@@ -209,6 +196,9 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	var cfg config.Config
 	if err := v.UnmarshalExact(&cfg); err != nil {
 		return config.Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	if !v.IsSet("video.profiles") {
+		cfg.Video.Profiles = defaults.Video.Profiles
 	}
 	if err := cfg.Validate(); err != nil {
 		return config.Config{}, err

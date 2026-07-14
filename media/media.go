@@ -21,6 +21,7 @@ const (
 // Quality contains runtime-adjustable video settings.
 type Quality struct {
 	Profile     string `json:"profile"`
+	Option      string `json:"option"`
 	Width       int    `json:"width"`
 	Height      int    `json:"height"`
 	Framerate   int    `json:"framerate"`
@@ -84,9 +85,7 @@ func ValidateProfiles(profiles map[string]EncoderProfile, quality Quality, tunin
 		errs = append(errs, errors.New("at least one video profile is required"))
 	}
 	for name, profile := range profiles {
-		profileQuality := quality
-		profileQuality.Profile = name
-		if err := profile.Validate(name, profileQuality, tuning); err != nil {
+		if err := profile.Validate(name, tuning); err != nil {
 			errs = append(errs, err)
 		}
 		for otherName, otherProfile := range profiles {
@@ -108,12 +107,25 @@ func ValidateProfiles(profiles map[string]EncoderProfile, quality Quality, tunin
 
 // Validate checks runtime video quality settings.
 func (quality Quality) Validate(profiles map[string]EncoderProfile) error {
-	var errs []error
 	profile, exists := profiles[quality.Profile]
 	if !exists {
-		errs = append(errs, fmt.Errorf("video profile %q is not configured", quality.Profile))
+		return fmt.Errorf("video profile %q is not configured", quality.Profile)
 	}
+	_, exists = profile.Options[quality.Option]
+	if !exists {
+		return fmt.Errorf("video option %q is not configured for profile %q", quality.Option, quality.Profile)
+	}
+	if err := validateQualityValues(quality); err != nil {
+		return err
+	}
+	if err := profile.Limits.Validate(quality.Profile, quality); err != nil {
+		return err
+	}
+	return nil
+}
 
+func validateQualityValues(quality Quality) error {
+	var errs []error
 	if quality.Width < 320 || quality.Width > 7680 || quality.Width%2 != 0 {
 		errs = append(errs, errors.New("video width must be an even number between 320 and 7680"))
 	}
@@ -129,10 +141,6 @@ func (quality Quality) Validate(profiles map[string]EncoderProfile) error {
 			MinBitrateKbps,
 		))
 	}
-	if exists {
-		errs = append(errs, profile.Limits.Validate(quality.Profile, quality))
-	}
-
 	return errors.Join(errs...)
 }
 
@@ -278,6 +286,7 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 	s.logger.Info("desktop capture started",
 		zap.Uint32("pipewire_node_id", stream.NodeID),
 		zap.String("profile", s.cfg.Quality.Profile),
+		zap.String("option", s.cfg.Quality.Option),
 		zap.String("codec", s.cfg.Profiles[s.cfg.Quality.Profile].Codec.ID),
 		zap.Int("width", s.cfg.Quality.Width),
 		zap.Int("height", s.cfg.Quality.Height),
@@ -423,6 +432,7 @@ func (s *Service) UpdateQuality(quality Quality) error {
 	if bitrateOnly {
 		s.logger.Info("video bitrate updated",
 			zap.String("profile", quality.Profile),
+			zap.String("option", quality.Option),
 			zap.Int("bitrate_kbps", quality.BitrateKbps),
 			zap.Duration("duration", time.Since(started)),
 		)
@@ -430,6 +440,7 @@ func (s *Service) UpdateQuality(quality Quality) error {
 	}
 	s.logger.Info("video quality updated",
 		zap.String("profile", quality.Profile),
+		zap.String("option", quality.Option),
 		zap.String("codec", s.cfg.Profiles[quality.Profile].Codec.ID),
 		zap.Int("width", quality.Width),
 		zap.Int("height", quality.Height),
