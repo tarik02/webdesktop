@@ -10,7 +10,6 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
 	pion "github.com/pion/webrtc/v4"
-	"github.com/tarik02/webdesktop/media"
 )
 
 const (
@@ -57,9 +56,9 @@ func (t *sampleTrack) Bind(context pion.TrackLocalContext) (pion.RTPCodecParamet
 
 	var payloader rtp.Payloader
 	switch t.payloader {
-	case media.PayloaderVP8:
+	case PayloaderVP8:
 		payloader = &codecs.VP8Payloader{}
-	case media.PayloaderH264:
+	case PayloaderH264:
 		payloader = &codecs.H264Payloader{}
 	case payloaderOpus:
 		payloader = &codecs.OpusPayloader{}

@@ -154,6 +154,7 @@ the input lock. Transfers are limited to 32 MiB.
 | --- | --- | --- |
 | `webrtc.signaling_path` | `/webrtc` | Clean absolute path below `/` |
 | `webrtc.max_peers` | `2` | 1 through 64 |
+| `webrtc.replace_existing_peer` | `false` | Requires `max_peers: 1`; a new signaling connection closes and replaces the current peer |
 | `webrtc.ice_servers` | `[]` | STUN or TURN URLs |
 | `webrtc.ice_username` | empty | Required with TURN |
 | `webrtc.ice_credential` | empty | Required with TURN |

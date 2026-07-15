@@ -10,7 +10,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtcp"
 	pion "github.com/pion/webrtc/v4"
-	"github.com/tarik02/webdesktop/media"
 	"go.uber.org/zap"
 )
 
@@ -21,12 +20,12 @@ type videoPutResult struct {
 
 type videoMailbox struct {
 	mu      sync.Mutex
-	pending *media.Sample
+	pending *VideoSample
 	wake    chan struct{}
 }
 
 func newVideoMailbox() videoMailbox { return videoMailbox{wake: make(chan struct{}, 1)} }
-func (m *videoMailbox) put(sample media.Sample) videoPutResult {
+func (m *videoMailbox) put(sample VideoSample) videoPutResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.pending != nil && m.pending.KeyFrame && !sample.KeyFrame {
@@ -40,7 +39,7 @@ func (m *videoMailbox) put(sample media.Sample) videoPutResult {
 	}
 	return videoPutResult{accepted: true, replaced: replaced}
 }
-func (m *videoMailbox) take(ctx context.Context) (media.Sample, bool) {
+func (m *videoMailbox) take(ctx context.Context) (VideoSample, bool) {
 	for {
 		m.mu.Lock()
 		if m.pending != nil {
@@ -52,7 +51,7 @@ func (m *videoMailbox) take(ctx context.Context) (media.Sample, bool) {
 		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return media.Sample{}, false
+			return VideoSample{}, false
 		case <-m.wake:
 		}
 	}
@@ -70,7 +69,7 @@ const audioMailboxCapacity = 4
 
 type audioMailbox struct {
 	mu    sync.Mutex
-	queue []media.AudioSample
+	queue []AudioSample
 	wake  chan struct{}
 }
 
@@ -81,7 +80,7 @@ func (m *audioMailbox) signalLocked() {
 	default:
 	}
 }
-func (m *audioMailbox) put(sample media.AudioSample) int {
+func (m *audioMailbox) put(sample AudioSample) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	dropped := 0
@@ -95,11 +94,11 @@ func (m *audioMailbox) put(sample media.AudioSample) int {
 	m.signalLocked()
 	return dropped
 }
-func (m *audioMailbox) take(ctx context.Context) (media.AudioSample, bool) {
+func (m *audioMailbox) take(ctx context.Context) (AudioSample, bool) {
 	for {
 		select {
 		case <-ctx.Done():
-			return media.AudioSample{}, false
+			return AudioSample{}, false
 		case <-m.wake:
 			m.mu.Lock()
 			if len(m.queue) > 0 {
@@ -169,7 +168,7 @@ func (p *peer) readRTCP(sender *pion.RTPSender, video bool) {
 	}
 }
 
-func (p *peer) enqueueVideo(sample media.Sample) {
+func (p *peer) enqueueVideo(sample VideoSample) {
 	if p.isClosing() || !p.connected.Load() || p.ctx.Err() != nil {
 		return
 	}
@@ -192,7 +191,7 @@ func (p *peer) enqueueVideo(sample media.Sample) {
 	}
 }
 
-func (p *peer) enqueueAudio(sample media.AudioSample) {
+func (p *peer) enqueueAudio(sample AudioSample) {
 	if p.isClosing() || !p.connected.Load() || p.ctx.Err() != nil {
 		return
 	}

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/go-gst/go-gst/gst"
-	"github.com/tarik02/webdesktop/capture"
 	"go.uber.org/zap"
 )
 
@@ -37,7 +36,6 @@ type Tuning struct {
 
 // Config contains capture, quality, and encoder settings.
 type Config struct {
-	Capture  capture.Config
 	Profiles map[string]EncoderProfile
 	Quality  Quality
 	Tuning   Tuning
@@ -58,9 +56,6 @@ type Sample struct {
 func (cfg Config) Validate() error {
 	var errs []error
 
-	if err := cfg.Capture.Validate(); err != nil {
-		errs = append(errs, err)
-	}
 	if err := ValidateProfiles(cfg.Profiles, cfg.Quality, cfg.Tuning); err != nil {
 		errs = append(errs, err)
 	}
@@ -211,7 +206,7 @@ type Service struct {
 	mu           sync.Mutex
 	started      bool
 	running      bool
-	session      *capture.Session
+	source       Source
 	pipeline     *persistentVideoPipeline
 	quality      Quality
 	samples      chan Sample
@@ -240,8 +235,8 @@ func New(cfg Config, logger *zap.Logger) (*Service, error) {
 	}, nil
 }
 
-// Run encodes one already-authorized portal session until the context is canceled.
-func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr error) {
+// Run encodes one PipeWire source until the context is canceled.
+func (s *Service) Run(ctx context.Context, source Source) (runErr error) {
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
@@ -249,15 +244,15 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 	}
 	s.started = true
 	s.mu.Unlock()
-	if session == nil {
-		return errors.New("portal capture session is required")
+	if source == nil {
+		return errors.New("video source is required")
 	}
 
 	defer s.closeSamples.Do(func() {
 		close(s.samples)
 	})
 
-	stream, err := session.AcquireStream()
+	stream, err := source.AcquireStream()
 	if err != nil {
 		return fmt.Errorf("acquire desktop capture stream: %w", err)
 	}
@@ -278,13 +273,14 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 	}
 
 	s.mu.Lock()
-	s.session = session
+	s.source = source
 	s.pipeline = pipeline
 	s.running = true
 	s.mu.Unlock()
 
 	s.logger.Info("desktop capture started",
 		zap.Uint32("pipewire_node_id", stream.NodeID),
+		zap.String("pipewire_target_object", stream.TargetObject),
 		zap.String("profile", s.cfg.Quality.Profile),
 		zap.String("option", s.cfg.Quality.Option),
 		zap.String("codec", s.cfg.Profiles[s.cfg.Quality.Profile].Codec.ID),
@@ -300,7 +296,7 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 		s.mu.Lock()
 		current := s.pipeline
 		s.pipeline = nil
-		s.session = nil
+		s.source = nil
 		s.running = false
 		s.mu.Unlock()
 
@@ -322,11 +318,11 @@ func (s *Service) Run(ctx context.Context, session *capture.Session) (runErr err
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-session.Done():
-			if err := session.Err(); err != nil {
+		case <-source.Done():
+			if err := source.Err(); err != nil {
 				return err
 			}
-			return errors.New("desktop capture session stopped")
+			return errors.New("video source stopped")
 		case <-current.Done():
 			s.mu.Lock()
 			active := s.pipeline
@@ -391,7 +387,7 @@ func (s *Service) UpdateQuality(quality Quality) error {
 	defer s.updateMu.Unlock()
 
 	s.mu.Lock()
-	if !s.running || s.pipeline == nil || s.session == nil {
+	if !s.running || s.pipeline == nil || s.source == nil {
 		s.mu.Unlock()
 		return errors.New("media service is not running")
 	}
@@ -422,7 +418,7 @@ func (s *Service) UpdateQuality(quality Quality) error {
 	}
 
 	s.mu.Lock()
-	if !s.running || s.pipeline != pipeline || s.session == nil {
+	if !s.running || s.pipeline != pipeline || s.source == nil {
 		s.mu.Unlock()
 		return errors.New("media service stopped during video quality update")
 	}

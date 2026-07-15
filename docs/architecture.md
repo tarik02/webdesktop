@@ -101,9 +101,13 @@ calibrated for sample-accurate lip sync.
 
 ## Embedding
 
-The `webrtc` Go package exposes its media interface, `Service.Run`,
-`Service.Close`, and a Gin `Handler`. Another application can mount the handler
-behind its own authentication and authorization middleware.
+The `webrtc` Go package exposes a standard `net/http` signaling handler and
+uses interfaces for media, audio, input, and clipboard integration. Importing
+it does not require the portal, GStreamer, or libei packages. Applications can
+mount it behind their own authentication middleware and use a custom frontend.
+
+See [Embedding the WebRTC transport](embedding.md) for the contracts and
+lifecycle options.
 
 ## Implementation references
 

@@ -13,7 +13,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	pion "github.com/pion/webrtc/v4"
-	"github.com/tarik02/webdesktop/media"
 	"go.uber.org/zap"
 )
 
@@ -41,7 +40,7 @@ type peer struct {
 	videoSender            *pion.RTPSender
 	videoTrack             *sampleTrack
 	videoProfile           string
-	videoCodec             media.RTPCodec
+	videoCodec             RTPCodec
 	videoFrontendTransform string
 	videoSamples           videoMailbox
 	audioSender            *pion.RTPSender
@@ -223,6 +222,9 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 			return
 		}
 		peer.logger.Info("peer connection state changed", zap.String("state", state.String()))
+		if s.cfg.Observer != nil {
+			s.cfg.Observer.PeerStateChanged(s.peerInfo(peer.id), state.String())
+		}
 		switch state {
 		case pion.PeerConnectionStateConnected:
 			if peer.isClosing() {
@@ -283,6 +285,9 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		peer.goOwned(peer.traceLoop)
 	}
 	peer.logger.Info("WebRTC peer created", zap.Int("active_peers", s.PeerCount()))
+	if s.cfg.Observer != nil {
+		s.cfg.Observer.PeerOpened(s.peerInfo(peer.id))
+	}
 	return peer, nil
 }
 
@@ -757,6 +762,9 @@ func (p *peer) finishClose(code int, reason string) {
 		p.service.removePeer(p)
 		p.service.releaseReservation()
 		close(p.done)
+		if p.service.cfg.Observer != nil {
+			p.service.cfg.Observer.PeerClosed(p.service.peerInfo(p.id))
+		}
 		p.logger.Info("WebRTC peer closed", zap.Int("active_peers", p.service.PeerCount()))
 	})
 }

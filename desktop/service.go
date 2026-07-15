@@ -11,12 +11,13 @@ import (
 	"github.com/tarik02/webdesktop/clipboard"
 	"github.com/tarik02/webdesktop/input"
 	"github.com/tarik02/webdesktop/input/eis"
+	"github.com/tarik02/webdesktop/media"
 	"go.uber.org/zap"
 )
 
 // Media runs the shared video pipeline against one authorized portal session.
 type Media interface {
-	Run(context.Context, *capture.Session) error
+	Run(context.Context, media.Source) error
 }
 
 // Service owns the portal session and coordinates its media and input users.
@@ -123,7 +124,7 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 		defer cancelMedia()
 		mediaResult := make(chan error, 1)
 		go func() {
-			mediaResult <- s.media.Run(mediaCtx, session)
+			mediaResult <- s.media.Run(mediaCtx, media.PortalSource(session))
 		}()
 
 		select {
@@ -152,5 +153,5 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 	s.readyOnce.Do(func() {
 		close(s.ready)
 	})
-	return s.media.Run(ctx, session)
+	return s.media.Run(ctx, media.PortalSource(session))
 }

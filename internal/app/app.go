@@ -71,7 +71,6 @@ func New(cfg config.Config) (*App, error) {
 	clipboardController := clipboard.New(cfg.Clipboard.Enabled)
 
 	mediaService, err := media.New(media.Config{
-		Capture:  portalConfig,
 		Profiles: cfg.Video.Profiles,
 		Quality:  selectedOption.Quality(cfg.Video.Profile, cfg.Video.Option),
 		Tuning: media.Tuning{
@@ -109,17 +108,22 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
+	var audioSource rtc.AudioSource
+	if cfg.Audio.Enabled {
+		audioSource = newAudioSourceAdapter(audioService)
+	}
 	webrtcService, err := rtc.New(rtc.Config{
-		AudioEnabled:   cfg.Audio.Enabled,
-		ICEServers:     cfg.WebRTC.ICEServers,
-		ICEUsername:    cfg.WebRTC.ICEUsername,
-		ICECredential:  cfg.WebRTC.ICECredential,
-		UDPPortMin:     uint16(cfg.WebRTC.UDPPortMin),
-		UDPPortMax:     uint16(cfg.WebRTC.UDPPortMax),
-		MaxPeers:       cfg.WebRTC.MaxPeers,
-		AllowedOrigins: cfg.WebRTC.AllowedOrigins,
-		TracingEnabled: cfg.Tracing.Enabled,
-	}, mediaService, audioService, inputController, clipboardController, logger.Named("webrtc"))
+		AudioEnabled:        cfg.Audio.Enabled,
+		ICEServers:          cfg.WebRTC.ICEServers,
+		ICEUsername:         cfg.WebRTC.ICEUsername,
+		ICECredential:       cfg.WebRTC.ICECredential,
+		UDPPortMin:          uint16(cfg.WebRTC.UDPPortMin),
+		UDPPortMax:          uint16(cfg.WebRTC.UDPPortMax),
+		MaxPeers:            cfg.WebRTC.MaxPeers,
+		ReplaceExistingPeer: cfg.WebRTC.ReplaceExistingPeer,
+		AllowedOrigins:      cfg.WebRTC.AllowedOrigins,
+		TracingEnabled:      cfg.Tracing.Enabled,
+	}, newMediaSourceAdapter(mediaService), audioSource, inputControllerAdapter{controller: inputController}, clipboardController, logger.Named("webrtc"))
 	if err != nil {
 		_ = inputController.Close()
 		_ = logger.Sync()
@@ -218,7 +222,7 @@ func New(cfg config.Config) (*App, error) {
 				Video:       mediaService.Quality(),
 			})
 		})
-		router.GET(cfg.WebRTC.SignalingPath, webrtcService.Handler())
+		router.GET(cfg.WebRTC.SignalingPath, gin.WrapH(webrtcService.Handler()))
 		webui.Mount(router)
 	})
 	if err != nil {

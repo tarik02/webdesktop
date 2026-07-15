@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-gst/go-gst/gst"
 	gstapp "github.com/go-gst/go-gst/gst/app"
-	"github.com/tarik02/webdesktop/capture"
 	"go.uber.org/zap"
 )
 
@@ -708,7 +707,7 @@ func (b *videoEncoderBranch) setErr(err error) {
 
 type persistentVideoPipeline struct {
 	pipeline  *gst.Pipeline
-	stream    *capture.Stream
+	stream    *SourceStream
 	source    *gst.Element
 	handoff   *gst.Element
 	sink      *gstapp.Sink
@@ -738,7 +737,7 @@ type persistentVideoPipeline struct {
 
 // newPersistentVideoPipeline takes ownership of stream on both success and failure.
 func newPersistentVideoPipeline(
-	stream *capture.Stream,
+	stream *SourceStream,
 	quality Quality,
 	profile EncoderProfile,
 	tuning Tuning,
@@ -783,10 +782,16 @@ func newPersistentVideoPipeline(
 		}
 	}()
 
-	if err := source.SetProperty("fd", stream.PipeWireFD); err != nil {
-		return nil, fmt.Errorf("set pipewiresrc fd: %w", err)
+	if stream.PipeWireFD >= 0 {
+		if err := source.SetProperty("fd", stream.PipeWireFD); err != nil {
+			return nil, fmt.Errorf("set pipewiresrc fd: %w", err)
+		}
 	}
-	if stream.HasPipeWireSerial {
+	if stream.TargetObject != "" {
+		if err := source.SetProperty("target-object", stream.TargetObject); err != nil {
+			return nil, fmt.Errorf("set pipewiresrc target object: %w", err)
+		}
+	} else if stream.HasPipeWireSerial {
 		if err := source.SetProperty("target-object", strconv.FormatUint(stream.PipeWireSerial, 10)); err != nil {
 			return nil, fmt.Errorf("set pipewiresrc target object: %w", err)
 		}
