@@ -952,6 +952,9 @@ func (p *persistentVideoPipeline) handleCaptureSample(sink *gstapp.Sink) gst.Flo
 	if !p.active.Load() {
 		return gst.FlowOK
 	}
+	if !videoSampleMatchesCaps(sample) {
+		return gst.FlowOK
+	}
 
 	started := time.Now()
 	if !p.samples.Store(sample) {
