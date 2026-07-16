@@ -7,7 +7,6 @@ import (
 	"unicode/utf8"
 
 	pion "github.com/pion/webrtc/v4"
-	remoteinput "github.com/tarik02/webdesktop/input"
 	"go.uber.org/zap"
 )
 
@@ -409,7 +408,7 @@ func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataCh
 		return
 	}
 	if err := p.service.input.Submit(p.id, event); err != nil {
-		if errors.Is(err, remoteinput.ErrOverloaded) {
+		if errors.Is(err, ErrInputOverloaded) {
 			p.inputOverloads.Add(1)
 			return
 		}
@@ -513,21 +512,21 @@ func inputSequencePointer(request inputRequest) *uint64 {
 
 func inputErrorCode(err error) string {
 	switch {
-	case errors.Is(err, remoteinput.ErrBusy):
+	case errors.Is(err, ErrInputBusy):
 		return "input_busy"
-	case errors.Is(err, remoteinput.ErrDisabled):
+	case errors.Is(err, ErrInputDisabled):
 		return "input_disabled"
-	case errors.Is(err, remoteinput.ErrPointerUnauthorized):
+	case errors.Is(err, ErrInputPointerUnauthorized):
 		return "input_pointer_unauthorized"
-	case errors.Is(err, remoteinput.ErrKeyboardUnauthorized):
+	case errors.Is(err, ErrInputKeyboardUnauthorized):
 		return "input_keyboard_unauthorized"
-	case errors.Is(err, remoteinput.ErrNotReady):
+	case errors.Is(err, ErrInputNotReady):
 		return "input_not_ready"
-	case errors.Is(err, remoteinput.ErrNotOwner):
+	case errors.Is(err, ErrInputNotOwner):
 		return "input_not_owned"
-	case errors.Is(err, remoteinput.ErrOverloaded):
+	case errors.Is(err, ErrInputOverloaded):
 		return "input_overloaded"
-	case errors.Is(err, remoteinput.ErrClosed):
+	case errors.Is(err, ErrInputClosed):
 		return "input_unavailable"
 	default:
 		return "input_failed"

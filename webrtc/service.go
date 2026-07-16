@@ -10,14 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/pion/interceptor"
 	"github.com/pion/stun/v3"
 	pion "github.com/pion/webrtc/v4"
-	"github.com/tarik02/webdesktop/clipboard"
-	remoteinput "github.com/tarik02/webdesktop/input"
-	"github.com/tarik02/webdesktop/media"
 	"go.uber.org/zap"
 )
 
@@ -32,33 +28,20 @@ var (
 	errServiceUnavailable = errors.New("WebRTC service is unavailable")
 )
 
-// Media is the capture API required by the WebRTC transport.
-type Media interface {
-	Samples() <-chan media.Sample
-	Quality() media.Quality
-	Profile(string) (media.EncoderProfile, bool)
-	UpdateQuality(media.Quality) error
-	RequestKeyframe() error
-	SetActive(bool)
-}
-
-// AudioMedia is the optional encoded audio API required by the WebRTC transport.
-type AudioMedia interface {
-	Enabled() bool
-	Samples() <-chan media.AudioSample
-}
-
 // Config contains static WebRTC and signaling settings.
 type Config struct {
-	AudioEnabled   bool
-	ICEServers     []string
-	ICEUsername    string
-	ICECredential  string
-	UDPPortMin     uint16
-	UDPPortMax     uint16
-	MaxPeers       int
-	AllowedOrigins []string
-	TracingEnabled bool
+	AudioEnabled        bool
+	ICEServers          []string
+	ICEUsername         string
+	ICECredential       string
+	UDPPortMin          uint16
+	UDPPortMax          uint16
+	Subprotocols        []string
+	MaxPeers            int
+	ReplaceExistingPeer bool
+	AllowedOrigins      []string
+	TracingEnabled      bool
+	Observer            Observer
 }
 
 // Validate checks the implemented transport settings.
@@ -67,6 +50,9 @@ func (cfg Config) Validate() error {
 
 	if cfg.MaxPeers < 1 || cfg.MaxPeers > 64 {
 		errs = append(errs, errors.New("WebRTC max peers must be between 1 and 64"))
+	}
+	if cfg.ReplaceExistingPeer && cfg.MaxPeers != 1 {
+		errs = append(errs, errors.New("replacing an existing peer requires WebRTC max peers to be 1"))
 	}
 	if (cfg.ICEUsername == "") != (cfg.ICECredential == "") {
 		errs = append(errs, errors.New("ICE username and credential must both be set or both be empty"))
@@ -112,10 +98,10 @@ func (cfg Config) Validate() error {
 // Service fans one encoded media source out to active peer connections.
 type Service struct {
 	cfg        Config
-	source     Media
-	audio      AudioMedia
-	input      *remoteinput.Controller
-	clipboard  *clipboard.Controller
+	source     MediaSource
+	audio      AudioSource
+	input      InputController
+	clipboard  ClipboardController
 	logger     *zap.Logger
 	audioCodec pion.RTPCodecCapability
 
@@ -124,6 +110,7 @@ type Service struct {
 
 	runMu   sync.Mutex
 	started bool
+	admitMu sync.Mutex
 
 	peersMu         sync.Mutex
 	closed          bool
@@ -142,10 +129,10 @@ type Service struct {
 // New constructs a reusable WebRTC service without opening listeners.
 func New(
 	cfg Config,
-	source Media,
-	audio AudioMedia,
-	inputController *remoteinput.Controller,
-	clipboardController *clipboard.Controller,
+	source MediaSource,
+	audio AudioSource,
+	inputController InputController,
+	clipboardController ClipboardController,
 	logger *zap.Logger,
 ) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
@@ -154,17 +141,8 @@ func New(
 	if source == nil {
 		return nil, errors.New("WebRTC media source is required")
 	}
-	if audio == nil {
-		return nil, errors.New("WebRTC audio source is required")
-	}
-	if audio.Enabled() != cfg.AudioEnabled {
-		return nil, errors.New("WebRTC audio configuration does not match the audio source")
-	}
-	if inputController == nil {
-		return nil, errors.New("WebRTC input controller is required")
-	}
-	if clipboardController == nil {
-		return nil, errors.New("WebRTC clipboard controller is required")
+	if cfg.AudioEnabled && audio == nil {
+		return nil, errors.New("WebRTC audio source is required when audio is enabled")
 	}
 	if logger == nil {
 		return nil, errors.New("WebRTC logger is required")
@@ -186,6 +164,12 @@ func New(
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	if inputController == nil {
+		inputController = disabledInputController{}
+	}
+	if clipboardController == nil {
+		clipboardController = disabledClipboardController{}
+	}
 	source.SetActive(false)
 	return &Service{
 		cfg:              cfg,
@@ -204,20 +188,26 @@ func New(
 }
 
 // Handler returns the signaling handler for mounting behind application middleware.
-func (s *Service) Handler() gin.HandlerFunc {
+func (s *Service) Handler() http.Handler {
 	upgrader := websocket.Upgrader{
 		HandshakeTimeout: defaultSignalingWriteTimeout,
 		CheckOrigin:      s.originAllowed,
+		Subprotocols:     append([]string(nil), s.cfg.Subprotocols...),
 	}
 
-	return func(c *gin.Context) {
-		connection, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := upgrader.Upgrade(writer, request, nil)
 		if err != nil {
 			s.logger.Debug("WebSocket upgrade rejected", zap.Error(err))
 			return
 		}
+		s.admitMu.Lock()
+		if s.cfg.ReplaceExistingPeer {
+			s.replaceActivePeer()
+		}
 
 		peer, err := s.newPeer(connection)
+		s.admitMu.Unlock()
 		if err != nil {
 			code := "internal_error"
 			status := websocket.CloseInternalServerErr
@@ -246,8 +236,8 @@ func (s *Service) Handler() gin.HandlerFunc {
 			return
 		}
 
-		peer.run(c.Request.Context())
-	}
+		peer.run(request.Context())
+	})
 }
 
 // Run forwards encoded samples until the context ends or media stops.
@@ -262,7 +252,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	defer s.Close()
 
-	var audioSamples <-chan media.AudioSample
+	var audioSamples <-chan AudioSample
 	if s.cfg.AudioEnabled {
 		audioSamples = s.audio.Samples()
 	}
@@ -356,7 +346,7 @@ func (s *Service) PeerCount() int {
 	return s.reservations
 }
 
-func videoCodecCapability(codec media.RTPCodec) pion.RTPCodecCapability {
+func videoCodecCapability(codec RTPCodec) pion.RTPCodecCapability {
 	feedback := make([]pion.RTCPFeedback, len(codec.RTCPFeedback))
 	for index, item := range codec.RTCPFeedback {
 		feedback[index] = pion.RTCPFeedback{Type: item.Type, Parameter: item.Parameter}
@@ -371,7 +361,7 @@ func videoCodecCapability(codec media.RTPCodec) pion.RTPCodecCapability {
 }
 
 func (s *Service) newPeerConnection(
-	codec media.RTPCodec,
+	codec RTPCodec,
 	videoCodec pion.RTPCodecCapability,
 ) (*pion.PeerConnection, error) {
 	mediaEngine := &pion.MediaEngine{}
@@ -487,6 +477,29 @@ func (s *Service) peerSnapshot() []*peer {
 		}
 	}
 	return peers
+}
+
+func (s *Service) replaceActivePeer() {
+	s.peersMu.Lock()
+	peers := make([]*peer, 0, len(s.peers))
+	for peer := range s.peers {
+		peers = append(peers, peer)
+	}
+	s.peersMu.Unlock()
+	for _, peer := range peers {
+		peer.closeWith(websocket.CloseNormalClosure, "replaced by a new peer")
+	}
+	for _, peer := range peers {
+		select {
+		case <-peer.done:
+		case <-time.After(servicePeerCloseTimeout):
+			return
+		}
+	}
+}
+
+func (s *Service) peerInfo(id uint64) PeerInfo {
+	return PeerInfo{ID: id, ActivePeers: s.PeerCount()}
 }
 
 func (s *Service) closePeerForProfileChange(peer *peer, generation uint64) {

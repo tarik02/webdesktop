@@ -13,8 +13,6 @@ import (
 	"unicode"
 
 	pion "github.com/pion/webrtc/v4"
-	"github.com/tarik02/webdesktop/input"
-	"github.com/tarik02/webdesktop/media"
 )
 
 const (
@@ -340,7 +338,7 @@ func decodeInputRequest(data []byte) (inputRequest, error) {
 	return request, nil
 }
 
-func qualityResponse(quality media.Quality) *controlQuality {
+func qualityResponse(quality Quality) *controlQuality {
 	return &controlQuality{
 		Profile:     quality.Profile,
 		Option:      quality.Option,
@@ -491,65 +489,65 @@ func validateControlRequest(request controlRequest) *protocolError {
 	return nil
 }
 
-func validateInputRequest(request inputRequest) (input.Event, *protocolError) {
+func validateInputRequest(request inputRequest) (InputEvent, *protocolError) {
 	if !request.Version.Set {
-		return input.Event{}, &protocolError{Code: "missing_field", Message: "version is required"}
+		return InputEvent{}, &protocolError{Code: "missing_field", Message: "version is required"}
 	}
 	if !request.Sequence.Set {
-		return input.Event{}, &protocolError{Code: "missing_field", Message: "sequence is required"}
+		return InputEvent{}, &protocolError{Code: "missing_field", Message: "sequence is required"}
 	}
 	if !request.Type.Set {
-		return input.Event{}, &protocolError{Code: "missing_field", Message: "type is required"}
+		return InputEvent{}, &protocolError{Code: "missing_field", Message: "type is required"}
 	}
 	if request.Version.Value != inputVersion {
-		return input.Event{}, &protocolError{
+		return InputEvent{}, &protocolError{
 			Code:    "unsupported_version",
 			Message: fmt.Sprintf("input protocol version %d is not supported", request.Version.Value),
 		}
 	}
 	if request.Sequence.Value == 0 {
-		return input.Event{}, &protocolError{
+		return InputEvent{}, &protocolError{
 			Code:    "invalid_sequence",
 			Message: "sequence must be greater than zero",
 		}
 	}
 
-	event := input.Event{Sequence: request.Sequence.Value}
+	event := InputEvent{Sequence: request.Sequence.Value}
 	switch request.Type.Value {
 	case inputTypePointerAbsolute:
 		if !request.X.Set || !request.Y.Set {
-			return input.Event{}, &protocolError{Code: "missing_field", Message: "x and y are required"}
+			return InputEvent{}, &protocolError{Code: "missing_field", Message: "x and y are required"}
 		}
 		if hasInputFields(request, "x", "y") {
-			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "absolute pointer motion contains unrelated fields"}
+			return InputEvent{}, &protocolError{Code: "unexpected_field", Message: "absolute pointer motion contains unrelated fields"}
 		}
 		if !finite(request.X.Value) || !finite(request.Y.Value) ||
 			request.X.Value < 0 || request.X.Value > 1 ||
 			request.Y.Value < 0 || request.Y.Value > 1 {
-			return input.Event{}, &protocolError{Code: "invalid_pointer", Message: "x and y must be finite numbers between 0 and 1"}
+			return InputEvent{}, &protocolError{Code: "invalid_pointer", Message: "x and y must be finite numbers between 0 and 1"}
 		}
-		event.Type = input.EventPointerAbsolute
+		event.Type = InputEventPointerAbsolute
 		event.X = request.X.Value
 		event.Y = request.Y.Value
 	case inputTypePointerRelative:
 		if !request.DX.Set || !request.DY.Set {
-			return input.Event{}, &protocolError{Code: "missing_field", Message: "dx and dy are required"}
+			return InputEvent{}, &protocolError{Code: "missing_field", Message: "dx and dy are required"}
 		}
 		if hasInputFields(request, "dx", "dy") {
-			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "relative pointer motion contains unrelated fields"}
+			return InputEvent{}, &protocolError{Code: "unexpected_field", Message: "relative pointer motion contains unrelated fields"}
 		}
 		if !finite(request.DX.Value) || !finite(request.DY.Value) {
-			return input.Event{}, &protocolError{Code: "invalid_pointer", Message: "dx and dy must be finite numbers"}
+			return InputEvent{}, &protocolError{Code: "invalid_pointer", Message: "dx and dy must be finite numbers"}
 		}
-		event.Type = input.EventPointerRelative
+		event.Type = InputEventPointerRelative
 		event.DX = request.DX.Value
 		event.DY = request.DY.Value
 	case inputTypePointerButton:
 		if !request.Button.Set || !request.Pressed.Set {
-			return input.Event{}, &protocolError{Code: "missing_field", Message: "button and pressed are required"}
+			return InputEvent{}, &protocolError{Code: "missing_field", Message: "button and pressed are required"}
 		}
 		if hasInputFields(request, "button", "pressed") {
-			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "pointer button contains unrelated fields"}
+			return InputEvent{}, &protocolError{Code: "unexpected_field", Message: "pointer button contains unrelated fields"}
 		}
 		buttons := map[string]uint32{
 			"primary":   0x110,
@@ -560,12 +558,12 @@ func validateInputRequest(request inputRequest) (input.Event, *protocolError) {
 		}
 		code, ok := buttons[request.Button.Value]
 		if !ok {
-			return input.Event{}, &protocolError{
+			return InputEvent{}, &protocolError{
 				Code:    "invalid_button",
 				Message: "button must be primary, middle, secondary, back, or forward",
 			}
 		}
-		event.Type = input.EventPointerButton
+		event.Type = InputEventPointerButton
 		event.ButtonCode = code
 		event.Pressed = request.Pressed.Value
 	case inputTypePointerScroll:
@@ -573,43 +571,43 @@ func validateInputRequest(request inputRequest) (input.Event, *protocolError) {
 			!request.Vertical.Set ||
 			!request.StopHorizontal.Set ||
 			!request.StopVertical.Set {
-			return input.Event{}, &protocolError{
+			return InputEvent{}, &protocolError{
 				Code:    "missing_field",
 				Message: "horizontal, vertical, stop_horizontal, and stop_vertical are required",
 			}
 		}
 		if hasInputFields(request, "horizontal", "vertical", "stop_horizontal", "stop_vertical") {
-			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "pointer scroll contains unrelated fields"}
+			return InputEvent{}, &protocolError{Code: "unexpected_field", Message: "pointer scroll contains unrelated fields"}
 		}
 		if !finite(request.Horizontal.Value) || !finite(request.Vertical.Value) {
-			return input.Event{}, &protocolError{Code: "invalid_scroll", Message: "horizontal and vertical must be finite numbers"}
+			return InputEvent{}, &protocolError{Code: "invalid_scroll", Message: "horizontal and vertical must be finite numbers"}
 		}
 		if request.Horizontal.Value == 0 &&
 			request.Vertical.Value == 0 &&
 			!request.StopHorizontal.Value &&
 			!request.StopVertical.Value {
-			return input.Event{}, &protocolError{Code: "invalid_scroll", Message: "scroll requires a delta or an axis stop"}
+			return InputEvent{}, &protocolError{Code: "invalid_scroll", Message: "scroll requires a delta or an axis stop"}
 		}
-		event.Type = input.EventPointerScroll
+		event.Type = InputEventPointerScroll
 		event.Horizontal = request.Horizontal.Value
 		event.Vertical = request.Vertical.Value
 		event.StopHorizontal = request.StopHorizontal.Value
 		event.StopVertical = request.StopVertical.Value
 	case inputTypeKeyboardKey:
 		if !request.Keycode.Set || !request.Pressed.Set {
-			return input.Event{}, &protocolError{Code: "missing_field", Message: "keycode and pressed are required"}
+			return InputEvent{}, &protocolError{Code: "missing_field", Message: "keycode and pressed are required"}
 		}
 		if hasInputFields(request, "keycode", "pressed") {
-			return input.Event{}, &protocolError{Code: "unexpected_field", Message: "keyboard key contains unrelated fields"}
+			return InputEvent{}, &protocolError{Code: "unexpected_field", Message: "keyboard key contains unrelated fields"}
 		}
 		if request.Keycode.Value < 1 || request.Keycode.Value > 0x2ff {
-			return input.Event{}, &protocolError{Code: "invalid_keycode", Message: "keycode must be a Linux evdev code between 1 and 767"}
+			return InputEvent{}, &protocolError{Code: "invalid_keycode", Message: "keycode must be a Linux evdev code between 1 and 767"}
 		}
-		event.Type = input.EventKeyboardKey
+		event.Type = InputEventKeyboardKey
 		event.Keycode = request.Keycode.Value
 		event.Pressed = request.Pressed.Value
 	default:
-		return input.Event{}, &protocolError{
+		return InputEvent{}, &protocolError{
 			Code:    "unsupported_type",
 			Message: fmt.Sprintf("input message type %q is not supported", request.Type.Value),
 		}
@@ -720,7 +718,7 @@ func validateAudioOffer(raw string) error {
 	}
 }
 
-func validateVideoOffer(raw string, codec media.RTPCodec) error {
+func validateVideoOffer(raw string, codec RTPCodec) error {
 	description := pion.SessionDescription{
 		Type: pion.SDPTypeOffer,
 		SDP:  raw,
@@ -790,7 +788,7 @@ func validateVideoOffer(raw string, codec media.RTPCodec) error {
 	return fmt.Errorf("offer does not support configured video codec %q", codec.ID)
 }
 
-func rewriteVideoAnswer(raw string, codec media.RTPCodec) (string, error) {
+func rewriteVideoAnswer(raw string, codec RTPCodec) (string, error) {
 	description := pion.SessionDescription{
 		Type: pion.SDPTypeAnswer,
 		SDP:  raw,

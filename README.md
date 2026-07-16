@@ -47,6 +47,7 @@ or TLS, so do not expose it directly to an untrusted network.
 - [Deployment and portal setup](docs/deployment.md)
 - [Configuration](docs/configuration.md)
 - [Media and WebRTC architecture](docs/architecture.md)
+- [Embedding the WebRTC transport](docs/embedding.md)
 - [Signaling and data-channel protocol](docs/protocol.md)
 - [Development and releases](docs/development.md)
 

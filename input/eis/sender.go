@@ -18,6 +18,8 @@ import (
 	"time"
 	"unsafe"
 
+	remoteinput "github.com/tarik02/webdesktop/input"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -43,16 +45,6 @@ type Region struct {
 	Width     uint32
 	Height    uint32
 	MappingID string
-}
-
-// Status reports the current EIS connection and device state.
-type Status struct {
-	Connected bool
-	Pointer   bool
-	Keyboard  bool
-	Regions   []Region
-	Reset     uint64
-	Err       error
 }
 
 type device struct {
@@ -135,7 +127,7 @@ func (s *Sender) Changes() <-chan struct{} {
 }
 
 // Status returns a snapshot of the sender state.
-func (s *Sender) Status() Status {
+func (s *Sender) Status() remoteinput.SenderStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.statusLocked()
@@ -496,17 +488,13 @@ func clampToRegion(x, y float64, region Region) (float64, float64) {
 	return min(max(x, float64(region.X)), maxX), min(max(y, float64(region.Y)), maxY)
 }
 
-func (s *Sender) statusLocked() Status {
-	status := Status{
+func (s *Sender) statusLocked() remoteinput.SenderStatus {
+	status := remoteinput.SenderStatus{
 		Connected: s.connected && !s.closed,
 		Reset:     s.reset,
 		Err:       s.err,
 	}
 	regions := s.regionsLocked()
-	status.Regions = make([]Region, 0, len(regions))
-	for _, region := range regions {
-		status.Regions = append(status.Regions, region.Region)
-	}
 	if s.cfg.Pointer {
 		status.Pointer = s.deviceLocked(C.EI_DEVICE_CAP_POINTER) != nil &&
 			s.deviceLocked(C.EI_DEVICE_CAP_BUTTON) != nil &&

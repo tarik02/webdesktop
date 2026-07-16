@@ -280,6 +280,7 @@ clipboard:
 webrtc:
   signaling_path: /webrtc
   max_peers: 2
+  replace_existing_peer: false
   ice_servers: []
   ice_username: ""
   ice_credential: ""

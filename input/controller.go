@@ -7,16 +7,14 @@ import (
 	"math"
 	"sort"
 	"sync"
-
-	"github.com/tarik02/webdesktop/input/eis"
 )
 
 var (
 	ErrBusy                 = errors.New("input is owned by another peer")
 	ErrDisabled             = errors.New("input is disabled")
-	ErrPointerUnauthorized  = errors.New("pointer input was not authorized by the portal")
-	ErrKeyboardUnauthorized = errors.New("keyboard input was not authorized by the portal")
-	ErrNotReady             = errors.New("EIS input is not ready")
+	ErrPointerUnauthorized  = errors.New("pointer input is not authorized")
+	ErrKeyboardUnauthorized = errors.New("keyboard input is not authorized")
+	ErrNotReady             = errors.New("input sender is not ready")
 	ErrNotOwner             = errors.New("peer does not own input")
 	ErrOverloaded           = errors.New("input queue is full")
 	ErrClosed               = errors.New("input controller is closed")
@@ -31,7 +29,7 @@ type Config struct {
 	QueueSize int
 }
 
-// Authorization records the device classes granted by the portal.
+// Authorization records the device classes authorized by the host.
 type Authorization struct {
 	Pointer  bool
 	Keyboard bool
@@ -71,6 +69,28 @@ type Event struct {
 	StopVertical   bool
 }
 
+// SenderStatus reports the current sender connection and device state.
+type SenderStatus struct {
+	Connected bool
+	Pointer   bool
+	Keyboard  bool
+	Reset     uint64
+	Err       error
+}
+
+// Sender delivers serialized input events to the desktop backend.
+type Sender interface {
+	Done() <-chan struct{}
+	Changes() <-chan struct{}
+	Status() SenderStatus
+	PointerAbsolute(float64, float64) error
+	PointerRelative(float64, float64) error
+	Button(uint32, bool) error
+	Scroll(float64, float64, bool, bool) error
+	KeyboardKey(uint32, bool) error
+	Close() error
+}
+
 type queuedEvent struct {
 	owner      uint64
 	generation uint64
@@ -91,13 +111,13 @@ type revocation struct {
 	cause    error
 }
 
-// Controller owns one optional libei sender and its peer leases.
+// Controller owns one optional input sender and its peer leases.
 type Controller struct {
 	cfg Config
 
 	mu             sync.Mutex
 	authorization  Authorization
-	sender         *eis.Sender
+	sender         Sender
 	setupErr       error
 	generation     uint64
 	owners         map[uint64]*ownerState
@@ -130,10 +150,10 @@ func New(cfg Config) (*Controller, error) {
 	return controller, nil
 }
 
-// Attach sets the portal authorization and transfers sender ownership.
-func (c *Controller) Attach(authorization Authorization, sender *eis.Sender) error {
+// Attach sets the input authorization and transfers sender ownership.
+func (c *Controller) Attach(authorization Authorization, sender Sender) error {
 	if sender == nil {
-		return errors.New("EIS sender is required")
+		return errors.New("input sender is required")
 	}
 
 	c.mu.Lock()
@@ -145,7 +165,7 @@ func (c *Controller) Attach(authorization Authorization, sender *eis.Sender) err
 	if c.sender != nil {
 		c.mu.Unlock()
 		_ = sender.Close()
-		return errors.New("input controller already has an EIS sender")
+		return errors.New("input controller already has a sender")
 	}
 	c.authorization = authorization
 	c.sender = sender
@@ -156,7 +176,7 @@ func (c *Controller) Attach(authorization Authorization, sender *eis.Sender) err
 	return nil
 }
 
-// SetUnavailable records portal authorization when the sender cannot start.
+// SetUnavailable records input authorization when the sender cannot start.
 func (c *Controller) SetUnavailable(authorization Authorization, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -164,7 +184,7 @@ func (c *Controller) SetUnavailable(authorization Authorization, err error) {
 	c.setupErr = err
 }
 
-// Acquire grants input access if the configured portal and EIS state is ready.
+// Acquire grants input access if the configured authorization and sender are ready.
 func (c *Controller) Acquire(owner uint64, revoke func(uint64, error)) (Capabilities, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -328,7 +348,7 @@ func (c *Controller) Revoke(cause error) {
 	}
 }
 
-// Close releases held state before closing the libei sender.
+// Close releases held state before closing the input sender.
 func (c *Controller) Close() error {
 	c.mu.Lock()
 	if c.closed {
@@ -470,7 +490,7 @@ func (c *Controller) handleEvent(queued queuedEvent) {
 	}
 }
 
-func (c *Controller) watchSender(sender *eis.Sender) {
+func (c *Controller) watchSender(sender Sender) {
 	reset := sender.Status().Reset
 	for {
 		select {

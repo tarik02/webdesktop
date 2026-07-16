@@ -101,14 +101,15 @@ type Clipboard struct {
 
 // WebRTC contains static peer transport and signaling settings.
 type WebRTC struct {
-	SignalingPath  string   `mapstructure:"signaling_path" yaml:"signaling_path"`
-	MaxPeers       int      `mapstructure:"max_peers" yaml:"max_peers"`
-	ICEServers     []string `mapstructure:"ice_servers" yaml:"ice_servers"`
-	ICEUsername    string   `mapstructure:"ice_username" yaml:"ice_username"`
-	ICECredential  string   `mapstructure:"ice_credential" yaml:"ice_credential"`
-	UDPPortMin     int      `mapstructure:"udp_port_min" yaml:"udp_port_min"`
-	UDPPortMax     int      `mapstructure:"udp_port_max" yaml:"udp_port_max"`
-	AllowedOrigins []string `mapstructure:"allowed_origins" yaml:"allowed_origins"`
+	SignalingPath       string   `mapstructure:"signaling_path" yaml:"signaling_path"`
+	MaxPeers            int      `mapstructure:"max_peers" yaml:"max_peers"`
+	ReplaceExistingPeer bool     `mapstructure:"replace_existing_peer" yaml:"replace_existing_peer"`
+	ICEServers          []string `mapstructure:"ice_servers" yaml:"ice_servers"`
+	ICEUsername         string   `mapstructure:"ice_username" yaml:"ice_username"`
+	ICECredential       string   `mapstructure:"ice_credential" yaml:"ice_credential"`
+	UDPPortMin          int      `mapstructure:"udp_port_min" yaml:"udp_port_min"`
+	UDPPortMax          int      `mapstructure:"udp_port_max" yaml:"udp_port_max"`
+	AllowedOrigins      []string `mapstructure:"allowed_origins" yaml:"allowed_origins"`
 }
 
 // Defaults returns the built-in service configuration.
@@ -169,7 +170,7 @@ func DefaultVideoProfiles() map[string]media.EncoderProfile {
 		ClockRate:    90000,
 		PayloadType:  102,
 		Payloader:    media.PayloaderH264,
-		SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e02a",
+		SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033",
 		RTCPFeedback: feedback,
 		SDP: media.SDPRequirements{
 			OfferFmtp: map[string]string{
@@ -177,15 +178,15 @@ func DefaultVideoProfiles() map[string]media.EncoderProfile {
 				"profile-level-id":   "(?i)^42e0[0-9a-f]{2}$",
 			},
 			AnswerFmtp: map[string]string{
-				"profile-level-id": "42e02a",
+				"profile-level-id": "42e033",
 			},
 		},
 	}
 	h264Limits := media.QualityLimits{
 		MaxBitrateKbps:             50000,
-		MaxMacroblocksPerDimension: 263,
-		MaxMacroblocksPerFrame:     8704,
-		MaxMacroblocksPerSecond:    522240,
+		MaxMacroblocksPerDimension: 543,
+		MaxMacroblocksPerFrame:     36864,
+		MaxMacroblocksPerSecond:    983040,
 	}
 	qualityOptions := func() map[string]media.QualityOption {
 		return map[string]media.QualityOption{
@@ -316,7 +317,7 @@ video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline
 videoscale method=nearest-neighbour !
 video/x-raw,format=I420,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
 x264enc name={{ element "encoder" }}
-  option-string=level=4.2
+  option-string=level=5.1
   bitrate={{ .BitrateKbps }}
   vbv-buf-capacity={{ ceilDiv 3000 .Framerate }}
   key-int-max={{ .KeyframeInterval }}
@@ -331,7 +332,7 @@ x264enc name={{ element "encoder" }}
   sliced-threads=true
   byte-stream=true !
 h264parse name={{ element "parser" }} config-interval=-1 !
-video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)4.2`,
+video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)5.1`,
 			Bitrate: []media.EncoderProperty{
 				{
 					Element:  "encoder",
@@ -442,6 +443,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.WebRTC.MaxPeers < 1 || cfg.WebRTC.MaxPeers > 64 {
 		errs = append(errs, errors.New("webrtc.max_peers must be between 1 and 64"))
+	}
+	if cfg.WebRTC.ReplaceExistingPeer && cfg.WebRTC.MaxPeers != 1 {
+		errs = append(errs, errors.New("webrtc.replace_existing_peer requires webrtc.max_peers to be 1"))
 	}
 	if (cfg.WebRTC.ICEUsername == "") != (cfg.WebRTC.ICECredential == "") {
 		errs = append(errs, errors.New("webrtc.ice_username and webrtc.ice_credential must both be set or both be empty"))
