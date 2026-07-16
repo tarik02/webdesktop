@@ -123,7 +123,7 @@ func New(cfg config.Config) (*App, error) {
 		ReplaceExistingPeer: cfg.WebRTC.ReplaceExistingPeer,
 		AllowedOrigins:      cfg.WebRTC.AllowedOrigins,
 		TracingEnabled:      cfg.Tracing.Enabled,
-	}, newMediaSourceAdapter(mediaService), audioSource, inputControllerAdapter{controller: inputController}, clipboardController, logger.Named("webrtc"))
+	}, newMediaSourceAdapter(mediaService), audioSource, inputController, clipboardController, logger.Named("webrtc"))
 	if err != nil {
 		_ = inputController.Close()
 		_ = logger.Sync()

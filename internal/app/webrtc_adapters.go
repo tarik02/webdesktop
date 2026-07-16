@@ -1,11 +1,8 @@
 package app
 
 import (
-	"errors"
-	"fmt"
 	"maps"
 
-	remoteinput "github.com/tarik02/webdesktop/input"
 	"github.com/tarik02/webdesktop/media"
 	rtc "github.com/tarik02/webdesktop/webrtc"
 )
@@ -126,66 +123,4 @@ func newAudioSourceAdapter(source *media.AudioService) *audioSourceAdapter {
 
 func (adapter *audioSourceAdapter) Samples() <-chan rtc.AudioSample {
 	return adapter.samples
-}
-
-type inputControllerAdapter struct {
-	controller *remoteinput.Controller
-}
-
-func (adapter inputControllerAdapter) Acquire(owner uint64, revoke func(uint64, error)) (rtc.InputCapabilities, error) {
-	capabilities, err := adapter.controller.Acquire(owner, func(sequence uint64, cause error) {
-		revoke(sequence, adaptInputError(cause))
-	})
-	return rtc.InputCapabilities{Pointer: capabilities.Pointer, Keyboard: capabilities.Keyboard}, adaptInputError(err)
-}
-
-func (adapter inputControllerAdapter) Release(owner uint64) error {
-	return adaptInputError(adapter.controller.Release(owner))
-}
-
-func (adapter inputControllerAdapter) Owns(owner uint64) bool {
-	return adapter.controller.Owns(owner)
-}
-
-func (adapter inputControllerAdapter) Submit(owner uint64, event rtc.InputEvent) error {
-	return adaptInputError(adapter.controller.Submit(owner, remoteinput.Event{
-		Sequence:       event.Sequence,
-		Type:           remoteinput.EventType(event.Type),
-		X:              event.X,
-		Y:              event.Y,
-		DX:             event.DX,
-		DY:             event.DY,
-		ButtonCode:     event.ButtonCode,
-		Keycode:        event.Keycode,
-		Pressed:        event.Pressed,
-		Horizontal:     event.Horizontal,
-		Vertical:       event.Vertical,
-		StopHorizontal: event.StopHorizontal,
-		StopVertical:   event.StopVertical,
-	}))
-}
-
-func adaptInputError(err error) error {
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, remoteinput.ErrBusy):
-		return rtc.ErrInputBusy
-	case errors.Is(err, remoteinput.ErrDisabled):
-		return rtc.ErrInputDisabled
-	case errors.Is(err, remoteinput.ErrPointerUnauthorized):
-		return rtc.ErrInputPointerUnauthorized
-	case errors.Is(err, remoteinput.ErrKeyboardUnauthorized):
-		return rtc.ErrInputKeyboardUnauthorized
-	case errors.Is(err, remoteinput.ErrNotReady):
-		return fmt.Errorf("%w: %s", rtc.ErrInputNotReady, err)
-	case errors.Is(err, remoteinput.ErrNotOwner):
-		return rtc.ErrInputNotOwner
-	case errors.Is(err, remoteinput.ErrOverloaded):
-		return rtc.ErrInputOverloaded
-	case errors.Is(err, remoteinput.ErrClosed):
-		return rtc.ErrInputClosed
-	default:
-		return err
-	}
 }

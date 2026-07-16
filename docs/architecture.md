@@ -15,7 +15,9 @@ xdg-desktop-portal
 ```
 
 Pointer and keyboard events travel in the other direction through a WebRTC data
-channel, the portal's `ConnectToEIS` file descriptor, and libei.
+channel and the generic input controller. The bundled desktop service connects
+that controller to the portal's `ConnectToEIS` file descriptor through libei;
+embedded applications can provide another input sender.
 
 Clipboard content uses a separate reliable data channel and the Clipboard portal
 attached to the same RemoteDesktop session. An active input session gates

@@ -2,10 +2,10 @@ package webrtc
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/tarik02/webdesktop/clipboard"
+	remoteinput "github.com/tarik02/webdesktop/input"
 )
 
 const (
@@ -14,14 +14,14 @@ const (
 )
 
 var (
-	ErrInputBusy                 = errors.New("input is owned by another peer")
-	ErrInputDisabled             = errors.New("input is disabled")
-	ErrInputPointerUnauthorized  = errors.New("pointer input is not authorized")
-	ErrInputKeyboardUnauthorized = errors.New("keyboard input is not authorized")
-	ErrInputNotReady             = errors.New("input is not ready")
-	ErrInputNotOwner             = errors.New("peer does not own input")
-	ErrInputOverloaded           = errors.New("input queue is full")
-	ErrInputClosed               = errors.New("input controller is closed")
+	ErrInputBusy                 = remoteinput.ErrBusy
+	ErrInputDisabled             = remoteinput.ErrDisabled
+	ErrInputPointerUnauthorized  = remoteinput.ErrPointerUnauthorized
+	ErrInputKeyboardUnauthorized = remoteinput.ErrKeyboardUnauthorized
+	ErrInputNotReady             = remoteinput.ErrNotReady
+	ErrInputNotOwner             = remoteinput.ErrNotOwner
+	ErrInputOverloaded           = remoteinput.ErrOverloaded
+	ErrInputClosed               = remoteinput.ErrClosed
 )
 
 // Quality contains runtime-adjustable video settings.
@@ -154,38 +154,21 @@ type AudioSource interface {
 }
 
 // InputCapabilities reports the input classes available to a peer.
-type InputCapabilities struct {
-	Pointer  bool
-	Keyboard bool
-}
+type InputCapabilities = remoteinput.Capabilities
 
 // InputEventType identifies one input event.
-type InputEventType uint8
+type InputEventType = remoteinput.EventType
 
 const (
-	InputEventPointerAbsolute InputEventType = iota + 1
-	InputEventPointerRelative
-	InputEventPointerButton
-	InputEventPointerScroll
-	InputEventKeyboardKey
+	InputEventPointerAbsolute = remoteinput.EventPointerAbsolute
+	InputEventPointerRelative = remoteinput.EventPointerRelative
+	InputEventPointerButton   = remoteinput.EventPointerButton
+	InputEventPointerScroll   = remoteinput.EventPointerScroll
+	InputEventKeyboardKey     = remoteinput.EventKeyboardKey
 )
 
 // InputEvent is one validated remote input transition or motion.
-type InputEvent struct {
-	Sequence       uint64
-	Type           InputEventType
-	X              float64
-	Y              float64
-	DX             float64
-	DY             float64
-	ButtonCode     uint32
-	Keycode        uint32
-	Pressed        bool
-	Horizontal     float64
-	Vertical       float64
-	StopHorizontal bool
-	StopVertical   bool
-}
+type InputEvent = remoteinput.Event
 
 // InputController owns peer input leases and dispatches validated events.
 type InputController interface {

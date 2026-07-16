@@ -1,7 +1,7 @@
 # Embedding the WebRTC transport
 
 The `webrtc` package can be embedded without using webdesktop's portal capture,
-GStreamer media service, libei input controller, clipboard controller, Gin
+GStreamer media service, libei input sender, clipboard controller, Gin
 server, or bundled frontend.
 
 Create a `webrtc.Service` with application-owned implementations of these
@@ -32,6 +32,18 @@ go mediaService.Run(ctx, source)
 The target source uses the process PipeWire remote and sets the supplied value
 as `pipewiresrc.target-object`. `media.PortalSource` keeps the existing portal
 capture path available to the bundled application.
+
+Applications can pass an `*input.Controller` directly as the WebRTC
+`InputController`. Implement `input.Sender` for the host input API and attach it
+with the available pointer and keyboard authorization. The controller retains
+lease locking, bounded queueing and motion coalescing, pressed key and button
+tracking, overload revocation, and cleanup. The bundled application uses
+`input/eis.Sender`; another host can use a compositor control socket instead.
+
+Applications can also reuse `clipboard.Controller` by implementing its
+`clipboard.Backend` contract and calling `Attach`. The controller retains
+selection subscriptions, generation checks, MIME normalization, reads, writes,
+and latest-content tracking, while WebRTC handles transfer framing and limits.
 
 `InputController` and `ClipboardController` may be `nil`. The service then uses
 disabled implementations and rejects the corresponding protocol requests.
