@@ -952,12 +952,15 @@ func (p *persistentVideoPipeline) handleCaptureSample(sink *gstapp.Sink) gst.Flo
 	if !p.active.Load() {
 		return gst.FlowOK
 	}
-	if !videoSampleMatchesCaps(sample) {
+	normalized := normalizeVideoSampleLayout(sample)
+	if normalized == nil {
 		return gst.FlowOK
 	}
+	runtime.SetFinalizer(normalized, nil)
+	defer normalized.Unref()
 
 	started := time.Now()
-	if !p.samples.Store(sample) {
+	if !p.samples.Store(normalized) {
 		return gst.FlowFlushing
 	}
 
