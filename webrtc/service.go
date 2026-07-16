@@ -36,6 +36,7 @@ type Config struct {
 	ICECredential       string
 	UDPPortMin          uint16
 	UDPPortMax          uint16
+	Subprotocols        []string
 	MaxPeers            int
 	ReplaceExistingPeer bool
 	AllowedOrigins      []string
@@ -191,6 +192,7 @@ func (s *Service) Handler() http.Handler {
 	upgrader := websocket.Upgrader{
 		HandshakeTimeout: defaultSignalingWriteTimeout,
 		CheckOrigin:      s.originAllowed,
+		Subprotocols:     append([]string(nil), s.cfg.Subprotocols...),
 	}
 
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
