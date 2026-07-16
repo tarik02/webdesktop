@@ -170,7 +170,7 @@ func DefaultVideoProfiles() map[string]media.EncoderProfile {
 		ClockRate:    90000,
 		PayloadType:  102,
 		Payloader:    media.PayloaderH264,
-		SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e02a",
+		SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033",
 		RTCPFeedback: feedback,
 		SDP: media.SDPRequirements{
 			OfferFmtp: map[string]string{
@@ -178,15 +178,15 @@ func DefaultVideoProfiles() map[string]media.EncoderProfile {
 				"profile-level-id":   "(?i)^42e0[0-9a-f]{2}$",
 			},
 			AnswerFmtp: map[string]string{
-				"profile-level-id": "42e02a",
+				"profile-level-id": "42e033",
 			},
 		},
 	}
 	h264Limits := media.QualityLimits{
 		MaxBitrateKbps:             50000,
-		MaxMacroblocksPerDimension: 263,
-		MaxMacroblocksPerFrame:     8704,
-		MaxMacroblocksPerSecond:    522240,
+		MaxMacroblocksPerDimension: 543,
+		MaxMacroblocksPerFrame:     36864,
+		MaxMacroblocksPerSecond:    983040,
 	}
 	qualityOptions := func() map[string]media.QualityOption {
 		return map[string]media.QualityOption{
@@ -317,7 +317,7 @@ video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline
 videoscale method=nearest-neighbour !
 video/x-raw,format=I420,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
 x264enc name={{ element "encoder" }}
-  option-string=level=4.2
+  option-string=level=5.1
   bitrate={{ .BitrateKbps }}
   vbv-buf-capacity={{ ceilDiv 3000 .Framerate }}
   key-int-max={{ .KeyframeInterval }}
@@ -332,7 +332,7 @@ x264enc name={{ element "encoder" }}
   sliced-threads=true
   byte-stream=true !
 h264parse name={{ element "parser" }} config-interval=-1 !
-video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)4.2`,
+video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline,level=(string)5.1`,
 			Bitrate: []media.EncoderProperty{
 				{
 					Element:  "encoder",
