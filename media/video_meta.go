@@ -15,12 +15,10 @@ static gboolean webdesktop_video_sample_matches_caps(void *sample_ptr) {
 
 	if (buffer == NULL || caps == NULL || !gst_video_info_from_caps(&info, caps))
 		return TRUE;
-	if (gst_buffer_get_size(buffer) < info.size)
-		return FALSE;
 
 	meta = gst_buffer_get_video_meta(buffer);
 	if (meta == NULL)
-		return TRUE;
+		return gst_buffer_get_size(buffer) >= info.size;
 	return info.width == meta->width && info.height == meta->height;
 }
 */
