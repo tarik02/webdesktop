@@ -12,7 +12,6 @@ static gboolean webdesktop_video_sample_matches_caps(void *sample_ptr) {
 	GstCaps *caps = gst_sample_get_caps(sample);
 	GstVideoMeta *meta;
 	GstVideoInfo info;
-	guint plane;
 
 	if (buffer == NULL || caps == NULL || !gst_video_info_from_caps(&info, caps))
 		return TRUE;
@@ -22,17 +21,7 @@ static gboolean webdesktop_video_sample_matches_caps(void *sample_ptr) {
 	meta = gst_buffer_get_video_meta(buffer);
 	if (meta == NULL)
 		return TRUE;
-	if (info.width != meta->width || info.height != meta->height ||
-	    GST_VIDEO_INFO_N_PLANES(&info) != meta->n_planes)
-		return FALSE;
-
-	for (plane = 0; plane < meta->n_planes; plane++) {
-		if (GST_VIDEO_INFO_PLANE_OFFSET(&info, plane) != meta->offset[plane] ||
-		    GST_VIDEO_INFO_PLANE_STRIDE(&info, plane) != meta->stride[plane])
-			return FALSE;
-	}
-
-	return TRUE;
+	return info.width == meta->width && info.height == meta->height;
 }
 */
 import "C"
