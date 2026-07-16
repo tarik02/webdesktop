@@ -480,7 +480,12 @@ func (s *Service) peerSnapshot() []*peer {
 }
 
 func (s *Service) replaceActivePeer() {
-	peers := s.peerSnapshot()
+	s.peersMu.Lock()
+	peers := make([]*peer, 0, len(s.peers))
+	for peer := range s.peers {
+		peers = append(peers, peer)
+	}
+	s.peersMu.Unlock()
 	for _, peer := range peers {
 		peer.closeWith(websocket.CloseNormalClosure, "replaced by a new peer")
 	}
