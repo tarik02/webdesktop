@@ -45,6 +45,8 @@ func Mount(router *gin.Engine) {
 
 		if requestPath == "index.html" {
 			c.Header("Cache-Control", "no-cache")
+			c.Header("Content-Security-Policy", "frame-ancestors 'none'")
+			c.Header("X-Frame-Options", "DENY")
 			c.Data(http.StatusOK, "text/html; charset=utf-8", index)
 			return
 		}

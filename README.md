@@ -13,6 +13,7 @@ uses Pion for WebRTC. There is no X11 capture path or fallback.
 - Portal-authorized pointer and keyboard input through libei
 - Bidirectional rich clipboard synchronization through the Clipboard portal
 - Embedded browser client and WebSocket signaling
+- Optional native password login and bearer token authentication
 - Persistent portal restore tokens for unattended service restarts
 
 ## Requirements
@@ -39,8 +40,10 @@ install -Dm600 webdesktop.example.yaml \
 The first launch opens the Plasma portal prompt. Select a monitor and allow the
 session to be restored. Then open `http://127.0.0.1:8080/`.
 
-The service listens on loopback by default. It has no built-in authentication
-or TLS, so do not expose it directly to an untrusted network.
+The service listens on loopback by default. Authentication is disabled by
+default and the server does not terminate TLS. Enable authentication and use an
+HTTPS reverse proxy, VPN, or SSH tunnel before exposing desktop control beyond
+a trusted host.
 
 ## Documentation
 

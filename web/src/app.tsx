@@ -5,6 +5,7 @@ import {
   CircleOffIcon,
   GaugeIcon,
   LoaderCircleIcon,
+  LogOutIcon,
   Maximize2Icon,
   RefreshCwIcon,
   Volume2Icon,
@@ -19,6 +20,7 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
+import { AuthScreen } from "#/components/auth-screen.tsx";
 import { Badge } from "#/components/ui/badge.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import { Card, CardContent, CardHeader, CardTitle } from "#/components/ui/card.tsx";
@@ -35,12 +37,20 @@ import {
 } from "#/lib/desktop-connection.ts";
 import { evdevKeycode } from "#/lib/keyboard.ts";
 import {
+  authSessionSchema,
   clipboardMIMESchema,
   serverConfigSchema,
+  type AuthSession,
   type Quality,
   type ClipboardFormat,
   type ServerConfig,
 } from "#/lib/protocol.ts";
+
+type AuthenticationState =
+  | { phase: "loading" }
+  | { phase: "anonymous"; session: AuthSession }
+  | { phase: "authenticated"; session: AuthSession }
+  | { phase: "error"; message: string };
 
 const pointerButtons: Readonly<
   Record<number, "primary" | "middle" | "secondary" | "back" | "forward">
@@ -60,6 +70,10 @@ function errorMessage(error: unknown) {
 }
 
 export function App() {
+  const [authentication, setAuthentication] = useState<AuthenticationState>({
+    phase: "loading",
+  });
+  const [authReload, setAuthReload] = useState(0);
   const [config, setConfig] = useState<ServerConfig | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>({
     phase: "idle",
@@ -86,15 +100,70 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    void fetch("/api/auth/session")
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`authentication status returned ${response.status}`);
+        }
+        return authSessionSchema.parse(await response.json());
+      })
+      .then((session) => {
+        if (!active) {
+          return;
+        }
+        setAuthentication({
+          phase: session.authenticated ? "authenticated" : "anonymous",
+          session,
+        });
+      })
+      .catch((cause) => {
+        if (active) {
+          setAuthentication({ phase: "error", message: errorMessage(cause) });
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authReload]);
+
+  useEffect(() => {
+    return () => {
+      if (pointerMotionFrameRef.current !== null) {
+        window.cancelAnimationFrame(pointerMotionFrameRef.current);
+        pointerMotionFrameRef.current = null;
+      }
+      pendingPointerRef.current = null;
+      connectionRef.current?.disposeImmediately();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (authentication.phase !== "authenticated") {
+      return;
+    }
+
+    let active = true;
     void fetch("/api/config")
       .then(async (response) => {
+        if (response.status === 401) {
+          setAuthentication((current) =>
+            current.phase === "authenticated"
+              ? {
+                  phase: "anonymous",
+                  session: { ...current.session, authenticated: false },
+                }
+              : current,
+          );
+          return null;
+        }
         if (!response.ok) {
           throw new Error(`service configuration returned ${response.status}`);
         }
         return serverConfigSchema.parse(await response.json());
       })
       .then((loaded) => {
-        if (!active) {
+        if (!active || !loaded) {
           return;
         }
         setConfig(loaded);
@@ -109,14 +178,8 @@ export function App() {
 
     return () => {
       active = false;
-      if (pointerMotionFrameRef.current !== null) {
-        window.cancelAnimationFrame(pointerMotionFrameRef.current);
-        pointerMotionFrameRef.current = null;
-      }
-      pendingPointerRef.current = null;
-      connectionRef.current?.disposeImmediately();
     };
-  }, []);
+  }, [authentication.phase]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -364,6 +427,29 @@ export function App() {
     setConnectionState({ phase: "idle" });
   };
 
+  const logout = async () => {
+    setError(null);
+    await disconnect();
+    try {
+      const response = await fetch("/api/auth/session", { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`logout returned ${response.status}`);
+      }
+      setConfig(null);
+      setConnectionState({ phase: "idle" });
+      setAuthentication((current) =>
+        current.phase === "authenticated"
+          ? {
+              phase: "anonymous",
+              session: { ...current.session, authenticated: false },
+            }
+          : current,
+      );
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  };
+
   useEffect(() => {
     if (!config || connectionRef.current) {
       return;
@@ -376,6 +462,17 @@ export function App() {
       const retry = window.setTimeout(() => {
         void fetch("/api/config")
           .then(async (response) => {
+            if (response.status === 401) {
+              setAuthentication((current) =>
+                current.phase === "authenticated"
+                  ? {
+                      phase: "anonymous",
+                      session: { ...current.session, authenticated: false },
+                    }
+                  : current,
+              );
+              throw new Error("authentication is required");
+            }
             if (!response.ok) {
               throw new Error(`service configuration returned ${response.status}`);
             }
@@ -696,6 +793,35 @@ export function App() {
       setError(errorMessage(cause));
     }
   };
+
+  if (authentication.phase === "loading") {
+    return (
+      <main className="flex min-h-svh items-center justify-center bg-muted" aria-label="Loading">
+        <LoaderCircleIcon className="size-6 animate-spin text-muted-foreground" />
+      </main>
+    );
+  }
+  if (authentication.phase === "error") {
+    return (
+      <AuthScreen
+        phase="error"
+        message={authentication.message}
+        onRetry={() => {
+          setAuthentication({ phase: "loading" });
+          setAuthReload((attempt) => attempt + 1);
+        }}
+      />
+    );
+  }
+  if (authentication.phase === "anonymous") {
+    return (
+      <AuthScreen
+        phase="login"
+        session={authentication.session}
+        onAuthenticated={(session) => setAuthentication({ phase: "authenticated", session })}
+      />
+    );
+  }
 
   const connected = connectionState.phase === "connected";
   const profileOptions = config
@@ -1052,6 +1178,23 @@ export function App() {
               <TooltipContent side="bottom">
                 {audioPlaying ? "Mute desktop audio" : "Play desktop audio"}
               </TooltipContent>
+            </Tooltip>
+          ) : null}
+          {authentication.session.required ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    aria-label="Sign out"
+                    onClick={() => void logout()}
+                  />
+                }
+              >
+                <LogOutIcon />
+              </TooltipTrigger>
+              <TooltipContent side="bottom">Sign out</TooltipContent>
             </Tooltip>
           ) : null}
           <Tooltip>

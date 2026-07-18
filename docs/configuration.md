@@ -29,6 +29,42 @@ The complete default file is [webdesktop.example.yaml](../webdesktop.example.yam
 | `logging.format` | `json` | `json` or `console` |
 | `tracing.enabled` | `false` | Bounded server and browser diagnostics |
 
+## Authentication
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `auth.trusted_proxy_cidrs` | `[]` | Reverse proxies trusted to append client addresses for login rate limiting |
+| `auth.login.enabled` | `false` | Enable the embedded password login |
+| `auth.login.password_file` | empty | Owner-only file containing the password |
+| `auth.bearer.enabled` | `false` | Accept `Authorization: Bearer` and token login |
+| `auth.bearer.token_file` | empty | Owner-only file containing one bearer token |
+| `auth.session.ttl` | `24h` | Lifetime of in-memory browser sessions |
+| `auth.session.secure_cookie` | `false` | Send browser sessions only over HTTPS |
+
+Each mechanism is independent. When both are enabled, either the password or
+bearer token can create a browser session, and a valid bearer header can access
+protected HTTP and WebSocket routes directly. When both are disabled,
+webdesktop retains its unauthenticated behavior.
+
+Credential files must be regular owner-only files, contain one UTF-8 line, and
+have no group or other permission bits. Symlinks are rejected. Passwords must
+be at least 8 bytes; bearer tokens must be at least 32 bytes. One trailing
+newline is ignored. Webdesktop reads the files at startup and stores only
+SHA-256 digests in memory.
+
+Browser sessions are random, `HttpOnly`, `SameSite=Strict` cookies. They are
+revocable through the UI but are not persisted, so restarting the service logs
+browsers out. Logout and session expiry close WebSocket peers authorized by
+that session. Set `auth.session.secure_cookie` when the public URL uses HTTPS.
+Authentication over plain HTTP does not protect credentials from network
+observers.
+
+Login rate limiting uses the TCP peer address by default. If a reverse proxy
+must preserve separate client buckets, list only that proxy's CIDRs in
+`auth.trusted_proxy_cidrs`. Webdesktop then reads `X-Forwarded-For` from
+right to left and ignores values beyond the first untrusted hop. Never list a
+client network or an all-address CIDR.
+
 ## Video
 
 | Setting | Default | Notes |

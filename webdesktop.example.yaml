@@ -2,6 +2,18 @@ server:
   listen_address: 127.0.0.1:8080
   shutdown_timeout: 10s
 
+auth:
+  trusted_proxy_cidrs: []
+  login:
+    enabled: false
+    password_file: ""
+  bearer:
+    enabled: false
+    token_file: ""
+  session:
+    ttl: 24h
+    secure_cookie: false
+
 logging:
   level: info
   format: json

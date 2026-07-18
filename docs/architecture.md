@@ -108,6 +108,13 @@ uses interfaces for media, audio, input, and clipboard integration. Importing
 it does not require the portal, GStreamer, or libei packages. Applications can
 mount it behind their own authentication middleware and use a custom frontend.
 
+The bundled application adds authentication outside the transport package. Its
+Gin middleware accepts an in-memory browser session or configured bearer token
+before a peer reaches the WebSocket handler. WebRTC media and data channels are
+therefore bound to the identity that passed the signaling upgrade. A browser
+session context stays attached to the WebSocket handler so logout or expiry
+closes its peer server-side.
+
 See [Embedding the WebRTC transport](embedding.md) for the contracts and
 lifecycle options.
 

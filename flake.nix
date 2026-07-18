@@ -238,6 +238,8 @@
 
             embedded-assets = pkgs.runCommand "webdesktop-embedded-assets" { } ''
               grep -aFq "Reconnect" ${webdesktop}/bin/.webdesktop-wrapped
+              grep -aFq "Connect to this desktop" ${webdesktop}/bin/.webdesktop-wrapped
+              grep -aFq "/api/auth/session" ${webdesktop}/bin/.webdesktop-wrapped
               grep -aFq "/api/config" ${webdesktop}/bin/.webdesktop-wrapped
               mkdir -p $out
               touch $out/passed

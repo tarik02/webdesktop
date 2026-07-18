@@ -2,6 +2,16 @@ import { z } from "zod";
 
 export const maximumClipboardBytes = 32 * 1024 * 1024;
 
+export const authSessionSchema = z
+  .object({
+    version: z.literal(1),
+    required: z.boolean(),
+    authenticated: z.boolean(),
+    login_enabled: z.boolean(),
+    bearer_enabled: z.boolean(),
+  })
+  .strict();
+
 export const clipboardMIMESchema = z.enum([
   "text/plain",
   "text/html",
@@ -16,6 +26,12 @@ const protocolErrorSchema = z
   .object({
     code: z.string(),
     message: z.string(),
+  })
+  .strict();
+
+export const apiErrorResponseSchema = z
+  .object({
+    error: protocolErrorSchema,
   })
   .strict();
 
@@ -295,6 +311,7 @@ export const inputResponseSchema = z
   .strict();
 
 export type ServerConfig = z.infer<typeof serverConfigSchema>;
+export type AuthSession = z.infer<typeof authSessionSchema>;
 export type Quality = z.infer<typeof qualitySchema>;
 export type SignalResponse = z.infer<typeof signalResponseSchema>;
 export type ControlResponse = z.infer<typeof controlResponseSchema>;
