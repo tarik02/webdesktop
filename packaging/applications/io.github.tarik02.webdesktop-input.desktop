@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Webdesktop Input
+Exec=@webdesktop@/bin/.webdesktop-wrapped
+TryExec=@webdesktop@/bin/.webdesktop-wrapped
+Terminal=false
+NoDisplay=true
+X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input

@@ -23,7 +23,9 @@ The input protocol carries both physical keyboard transitions and committed
 UTF-8 text. Physical transitions support shortcuts and navigation. Text events
 preserve the client's active input method. Backends opt into text delivery by
 implementing `input.KeyboardTextSender`. The bundled EIS sender uses libei's
-text capability to deliver UTF-8 independently of the desktop keymap.
+text capability when the compositor offers it. On Plasma versions without that
+capability, it sends Unicode keysyms through KWin's authorized fake-input
+protocol.
 
 Clipboard content uses a separate reliable data channel and the Clipboard portal
 attached to the same RemoteDesktop session. An active input session gates
