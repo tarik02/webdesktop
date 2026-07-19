@@ -84,6 +84,8 @@ export function App() {
   const pendingPointerRef = useRef<{ x: number; y: number } | null>(null);
   const capturedPointersRef = useRef(new Set<number>());
   const textKeyCodesRef = useRef(new Set<string>());
+  const deferredMetaKeyCodesRef = useRef(new Set<string>());
+  const pasteMetaKeyCodesRef = useRef(new Set<string>());
 
   useEffect(() => {
     let active = true;
@@ -293,6 +295,8 @@ export function App() {
         if (!owned) {
           inputCapabilitiesRef.current = { pointer: false, keyboard: false };
           textKeyCodesRef.current.clear();
+          deferredMetaKeyCodesRef.current.clear();
+          pasteMetaKeyCodesRef.current.clear();
         }
         inputAcquirePendingRef.current = false;
         setLeaseOwned(owned);
@@ -456,6 +460,8 @@ export function App() {
     pendingPointerRef.current = null;
     inputAcquirePendingRef.current = false;
     textKeyCodesRef.current.clear();
+    deferredMetaKeyCodesRef.current.clear();
+    pasteMetaKeyCodesRef.current.clear();
     try {
       await connectionRef.current?.releaseInput();
     } catch (cause) {
@@ -635,6 +641,45 @@ export function App() {
     }
   };
 
+  const pasteBrowserClipboard = async () => {
+    const connection = connectionRef.current;
+    if (
+      !config?.clipboard.enabled ||
+      !leaseOwnedRef.current ||
+      !inputCapabilitiesRef.current.keyboard ||
+      !connection
+    ) {
+      return;
+    }
+    try {
+      const formats = new Map<ClipboardFormat["mimeType"], ClipboardFormat>();
+      for (const item of await navigator.clipboard.read()) {
+        for (const mimeType of item.types) {
+          const supported = clipboardMIMESchema.safeParse(mimeType.toLowerCase());
+          if (!supported.success) {
+            continue;
+          }
+          const data = await (await item.getType(mimeType)).arrayBuffer();
+          formats.set(supported.data, {
+            mimeType: supported.data,
+            data,
+          });
+        }
+      }
+      if (
+        connectionRef.current !== connection ||
+        !leaseOwnedRef.current ||
+        !inputCapabilitiesRef.current.keyboard
+      ) {
+        return;
+      }
+      await connection.pasteClipboard([...formats.values()]);
+      setError(null);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  };
+
   const keyboard = (event: KeyboardEvent<HTMLDivElement>, pressed: boolean) => {
     if (!leaseOwnedRef.current || !inputCapabilitiesRef.current.keyboard) {
       return;
@@ -644,13 +689,61 @@ export function App() {
       void releaseInput();
       return;
     }
+    const metaKey = event.code === "MetaLeft" || event.code === "MetaRight";
+    if (pressed && config?.clipboard.enabled && metaKey) {
+      deferredMetaKeyCodesRef.current.add(event.code);
+      return;
+    }
+    if (!pressed && deferredMetaKeyCodesRef.current.delete(event.code)) {
+      event.preventDefault();
+      const keycode = evdevKeycode(event.code);
+      if (keycode) {
+        connectionRef.current?.keyboardKey(keycode, true);
+        connectionRef.current?.keyboardKey(keycode, false);
+      }
+      return;
+    }
+    if (!pressed && pasteMetaKeyCodesRef.current.delete(event.code)) {
+      event.preventDefault();
+      return;
+    }
     if (
       pressed &&
       config?.clipboard.enabled &&
       ((event.code === "KeyV" && (event.ctrlKey || event.metaKey)) ||
         (event.code === "Insert" && event.shiftKey))
     ) {
+      if (
+        event.code === "KeyV" &&
+        event.ctrlKey &&
+        !event.metaKey &&
+        navigator.platform.startsWith("Mac")
+      ) {
+        event.preventDefault();
+        connectionRef.current?.releasePressed();
+        void pasteBrowserClipboard();
+        return;
+      }
+      if (event.metaKey) {
+        for (const code of deferredMetaKeyCodesRef.current) {
+          pasteMetaKeyCodesRef.current.add(code);
+        }
+        deferredMetaKeyCodesRef.current.clear();
+      }
       return;
+    }
+    if (
+      pressed &&
+      (deferredMetaKeyCodesRef.current.size > 0 || pasteMetaKeyCodesRef.current.size > 0)
+    ) {
+      for (const code of [...deferredMetaKeyCodesRef.current, ...pasteMetaKeyCodesRef.current]) {
+        const keycode = evdevKeycode(code);
+        if (keycode) {
+          connectionRef.current?.keyboardKey(keycode, true);
+        }
+      }
+      deferredMetaKeyCodesRef.current.clear();
+      pasteMetaKeyCodesRef.current.clear();
     }
     if (!pressed && textKeyCodesRef.current.delete(event.code)) {
       event.preventDefault();
