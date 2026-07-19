@@ -343,4 +343,10 @@ export type InputMessage =
       type: "input.keyboard.key";
       keycode: number;
       pressed: boolean;
+    }
+  | {
+      version: 1;
+      sequence: number;
+      type: "input.keyboard.text";
+      text: string;
     };

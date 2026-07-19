@@ -851,6 +851,15 @@ export class DesktopConnection {
     });
   }
 
+  keyboardText(text: string) {
+    this.sendInput({
+      version: 1,
+      sequence: this.nextInputSequence(),
+      type: "input.keyboard.text",
+      text,
+    });
+  }
+
   pasteClipboard(formats: ClipboardFormat[]) {
     const transfer = this.clipboardSend
       .catch(() => undefined)

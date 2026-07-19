@@ -224,6 +224,22 @@ func (s *Sender) KeyboardKey(keycode uint32, pressed bool) error {
 	return nil
 }
 
+// KeyboardText sends committed UTF-8 text independently of the active keymap.
+func (s *Sender) KeyboardText(text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	device := s.deviceLocked(C.EI_DEVICE_CAP_TEXT)
+	if device == nil {
+		return fmt.Errorf("%w: keyboard text", ErrNotReady)
+	}
+	value := C.CString(text)
+	defer C.free(unsafe.Pointer(value))
+	C.ei_device_text_utf8(device, value)
+	C.ei_device_frame(device, C.ei_now(s.ei))
+	return nil
+}
+
 // Close stops dispatch, ends emulation, and releases the libei context.
 func (s *Sender) Close() error {
 	s.closeOnce.Do(func() {
@@ -522,3 +538,5 @@ func (s *Sender) notifyLocked() {
 	default:
 	}
 }
+
+var _ remoteinput.KeyboardTextSender = (*Sender)(nil)

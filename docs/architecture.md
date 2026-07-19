@@ -22,8 +22,8 @@ embedded applications can provide another input sender.
 The input protocol carries both physical keyboard transitions and committed
 UTF-8 text. Physical transitions support shortcuts and navigation. Text events
 preserve the client's active input method. Backends opt into text delivery by
-implementing `input.KeyboardTextSender`; the bundled EIS sender currently only
-implements physical keyboard transitions.
+implementing `input.KeyboardTextSender`. The bundled EIS sender uses libei's
+text capability to deliver UTF-8 independently of the desktop keymap.
 
 Clipboard content uses a separate reliable data channel and the Clipboard portal
 attached to the same RemoteDesktop session. An active input session gates

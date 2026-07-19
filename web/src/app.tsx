@@ -83,6 +83,7 @@ export function App() {
   const pointerMotionFrameRef = useRef<number | null>(null);
   const pendingPointerRef = useRef<{ x: number; y: number } | null>(null);
   const capturedPointersRef = useRef(new Set<number>());
+  const textKeyCodesRef = useRef(new Set<string>());
 
   useEffect(() => {
     let active = true;
@@ -291,6 +292,7 @@ export function App() {
         leaseOwnedRef.current = owned;
         if (!owned) {
           inputCapabilitiesRef.current = { pointer: false, keyboard: false };
+          textKeyCodesRef.current.clear();
         }
         inputAcquirePendingRef.current = false;
         setLeaseOwned(owned);
@@ -453,6 +455,7 @@ export function App() {
     }
     pendingPointerRef.current = null;
     inputAcquirePendingRef.current = false;
+    textKeyCodesRef.current.clear();
     try {
       await connectionRef.current?.releaseInput();
     } catch (cause) {
@@ -648,6 +651,19 @@ export function App() {
         (event.code === "Insert" && event.shiftKey))
     ) {
       return;
+    }
+    if (!pressed && textKeyCodesRef.current.delete(event.code)) {
+      event.preventDefault();
+      return;
+    }
+    if (pressed) {
+      textKeyCodesRef.current.delete(event.code);
+      if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        connectionRef.current?.keyboardText(event.key);
+        textKeyCodesRef.current.add(event.code);
+        return;
+      }
     }
     const keycode = evdevKeycode(event.code);
     if (!keycode) {
