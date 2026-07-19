@@ -165,6 +165,7 @@ const (
 	InputEventPointerButton   = remoteinput.EventPointerButton
 	InputEventPointerScroll   = remoteinput.EventPointerScroll
 	InputEventKeyboardKey     = remoteinput.EventKeyboardKey
+	InputEventKeyboardText    = remoteinput.EventKeyboardText
 )
 
 // InputEvent is one validated remote input transition or motion.

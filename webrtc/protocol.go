@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	pion "github.com/pion/webrtc/v4"
 )
@@ -39,6 +40,7 @@ const (
 	inputTypePointerButton   = "input.pointer.button"
 	inputTypePointerScroll   = "input.pointer.scroll"
 	inputTypeKeyboardKey     = "input.keyboard.key"
+	inputTypeKeyboardText    = "input.keyboard.text"
 	inputTypeError           = "error"
 
 	maxClientLogEventBytes       = 128
@@ -277,6 +279,7 @@ type inputRequest struct {
 	StopHorizontal optionalBool    `json:"stop_horizontal"`
 	StopVertical   optionalBool    `json:"stop_vertical"`
 	Keycode        optionalUint32  `json:"keycode"`
+	Text           optionalString  `json:"text"`
 }
 
 type inputResponse struct {
@@ -606,6 +609,24 @@ func validateInputRequest(request inputRequest) (InputEvent, *protocolError) {
 		event.Type = InputEventKeyboardKey
 		event.Keycode = request.Keycode.Value
 		event.Pressed = request.Pressed.Value
+	case inputTypeKeyboardText:
+		if !request.Text.Set {
+			return InputEvent{}, &protocolError{Code: "missing_field", Message: "text is required"}
+		}
+		if hasInputFields(request, "text") {
+			return InputEvent{}, &protocolError{Code: "unexpected_field", Message: "keyboard text contains unrelated fields"}
+		}
+		if request.Text.Value == "" ||
+			!utf8.ValidString(request.Text.Value) ||
+			strings.ContainsRune(request.Text.Value, '\x00') ||
+			len(request.Text.Value) > maxInputMessageBytes {
+			return InputEvent{}, &protocolError{
+				Code:    "invalid_text",
+				Message: "text must contain between 1 and 4096 UTF-8 bytes without NUL characters",
+			}
+		}
+		event.Type = InputEventKeyboardText
+		event.Text = request.Text.Value
 	default:
 		return InputEvent{}, &protocolError{
 			Code:    "unsupported_type",
@@ -628,6 +649,7 @@ func hasInputFields(request inputRequest, allowed ...string) bool {
 		"stop_horizontal": request.StopHorizontal.Set,
 		"stop_vertical":   request.StopVertical.Set,
 		"keycode":         request.Keycode.Set,
+		"text":            request.Text.Set,
 	}
 	for _, name := range allowed {
 		delete(fields, name)

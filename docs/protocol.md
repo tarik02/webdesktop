@@ -289,6 +289,25 @@ the gesture ends.
 `keycode` is a Linux evdev code from 1 through 767. Browser clients must map
 `KeyboardEvent.code` to evdev codes.
 
+### Keyboard text
+
+```json
+{
+  "version": 1,
+  "sequence": 6,
+  "type": "input.keyboard.text",
+  "text": "Привіт"
+}
+```
+
+`text` is nonempty UTF-8 committed text and must not contain NUL. The complete
+JSON message, including the text, must fit the 4 KiB input message limit. Use
+keyboard text for text entry and IME commits. Continue to use keyboard key
+events for physical key transitions, shortcuts, and navigation keys.
+
+Keyboard text requires backend support. If the active input sender cannot
+deliver text, the server reports `input_not_ready` and revokes the input lease.
+
 Successful input events have no response. Errors include the decoded sequence:
 
 ```json
@@ -305,7 +324,7 @@ Successful input events have no response. Errors include the decoded sequence:
 ```
 
 The input worker coalesces adjacent motion and continuous scroll events when
-ordering remains intact. It never drops key, button, or scroll-stop
+ordering remains intact. It never drops key, text, button, or scroll-stop
 transitions. An overload returns `input_overloaded`, releases that peer's held
 state, and closes the input channel.
 
