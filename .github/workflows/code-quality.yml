@@ -18,37 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
 
-      - uses: actions/setup-go@v6.5.0
-        with:
-          go-version-file: go.mod
-
-      - uses: pnpm/action-setup@v6.0.9
-        with:
-          package_json_file: web/package.json
-
-      - uses: actions/setup-node@v6.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-
-      - name: Install native dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libei-dev \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            pkg-config
+      - uses: cachix/install-nix-action@v31.10.7
 
       - name: Build frontend
-        working-directory: web
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build
+        run: nix develop -c bash -c 'cd web && pnpm install --frozen-lockfile && pnpm build'
 
-      - uses: golangci/golangci-lint-action@v9.3.0
-        with:
-          version: v2.12.2
-          args: --timeout=5m
-          problem-matchers: true
+      - name: Run golangci-lint
+        run: nix develop -c golangci-lint run --timeout=5m
