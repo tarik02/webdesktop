@@ -39,6 +39,11 @@ with the available pointer and keyboard authorization. The controller retains
 lease locking, bounded queueing and motion coalescing, pressed key and button
 tracking, overload revocation, and cleanup. The bundled application uses
 `input/eis.Sender`; another host can use a compositor control socket instead.
+Implement the optional `input.KeyboardTextSender` interface to receive committed
+UTF-8 text events. The bundled EIS sender implements it when the EIS server
+offers libei's text capability or KWin's Unicode keysym protocol is available.
+Without backend support, physical keyboard events still work, but a text event
+returns `input.ErrNotReady` and revokes the input lease.
 
 Applications can also reuse `clipboard.Controller` by implementing its
 `clipboard.Backend` contract and calling `Attach`. The controller retains

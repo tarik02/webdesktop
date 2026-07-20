@@ -50,6 +50,7 @@ const (
 	EventPointerButton
 	EventPointerScroll
 	EventKeyboardKey
+	EventKeyboardText
 )
 
 // Event is one validated input transition or motion.
@@ -62,6 +63,7 @@ type Event struct {
 	DY             float64
 	ButtonCode     uint32
 	Keycode        uint32
+	Text           string
 	Pressed        bool
 	Horizontal     float64
 	Vertical       float64
@@ -89,6 +91,11 @@ type Sender interface {
 	Scroll(float64, float64, bool, bool) error
 	KeyboardKey(uint32, bool) error
 	Close() error
+}
+
+// KeyboardTextSender optionally delivers committed UTF-8 text to the desktop backend.
+type KeyboardTextSender interface {
+	KeyboardText(string) error
 }
 
 type queuedEvent struct {
@@ -255,7 +262,7 @@ func (c *Controller) Submit(owner uint64, event Event) error {
 		return ErrNotOwner
 	}
 	switch event.Type {
-	case EventKeyboardKey:
+	case EventKeyboardKey, EventKeyboardText:
 		if !c.cfg.Keyboard {
 			c.mu.Unlock()
 			return errors.New("keyboard input is disabled")
@@ -473,6 +480,13 @@ func (c *Controller) handleEvent(queued queuedEvent) {
 					c.pressedKeys[queued.event.Keycode] = count - 1
 				}
 			}
+		}
+	case EventKeyboardText:
+		sender, ok := c.sender.(KeyboardTextSender)
+		if !ok {
+			err = ErrNotReady
+		} else {
+			err = sender.KeyboardText(queued.event.Text)
 		}
 	}
 	if err == nil {

@@ -111,6 +111,8 @@
             pkgs.gst_all_1.gstreamer
             pkgs.gst_all_1.gst-plugins-base
             pkgs.libei
+            pkgs.libxkbcommon
+            pkgs.wayland
           ];
           webdesktop = gomod2nixPkgs.buildGoApplication {
             pname = "webdesktop";
@@ -152,6 +154,9 @@
                 --replace-fail '@webdesktop@' "$out"
               install -m 0644 ${./LICENSE} \
                 $out/share/licenses/webdesktop/LICENSE
+              substitute ${./packaging/applications/io.github.tarik02.webdesktop-input.desktop} \
+                $out/share/applications/io.github.tarik02.webdesktop-input.desktop \
+                --replace-fail '@webdesktop@' "$out"
               install -m 0644 ${./THIRD_PARTY_NOTICES.md} \
                 $out/share/licenses/webdesktop/THIRD_PARTY_NOTICES.md
               install -m 0644 ${./webdesktop.example.yaml} \
@@ -229,9 +234,14 @@
                 ''
                   desktop-file-validate \
                     ${webdesktop}/share/applications/io.github.tarik02.webdesktop.desktop
+                  desktop-file-validate \
+                    ${webdesktop}/share/applications/io.github.tarik02.webdesktop-input.desktop
                   grep -Fq \
                     "Exec=${webdesktop}/bin/webdesktop serve" \
                     ${webdesktop}/share/applications/io.github.tarik02.webdesktop.desktop
+                  grep -Fq \
+                    "X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input" \
+                    ${webdesktop}/share/applications/io.github.tarik02.webdesktop-input.desktop
                   mkdir -p $out
                   touch $out/passed
                 '';

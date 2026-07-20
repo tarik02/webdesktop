@@ -1,5 +1,14 @@
 # Third-party notices
 
+## Plasma Wayland protocols
+
+`input/eis/fake-input-client-protocol.h` and
+`input/eis/fake-input-protocol.c` were generated from KDE's `fake-input.xml`.
+
+Copyright 2015 Martin Gräßlin
+
+SPDX-License-Identifier: LGPL-2.1-or-later
+
 ## shadcn
 
 The web UI includes files generated from and adapted from the

@@ -4,7 +4,7 @@
 package eis
 
 /*
-#cgo pkg-config: libei-1.0
+#cgo pkg-config: libei-1.0 wayland-client xkbcommon
 #include "bridge.h"
 #include <stdlib.h>
 */
@@ -59,8 +59,9 @@ type deviceRegion struct {
 
 // Sender owns one libei sender context and the backend file descriptor.
 type Sender struct {
-	cfg Config
-	ei  *C.struct_ei
+	cfg      Config
+	ei       *C.struct_ei
+	kwinText *C.struct_webdesktop_kwin_text
 
 	mu        sync.Mutex
 	devices   []device
@@ -105,12 +106,17 @@ func New(backendFD int, cfg Config) (*Sender, error) {
 		return nil, fmt.Errorf("set up libei backend fd: %d", int(result))
 	}
 
+	var kwinText *C.struct_webdesktop_kwin_text
+	if cfg.Keyboard {
+		kwinText = C.webdesktop_kwin_text_new()
+	}
 	sender := &Sender{
-		cfg:     cfg,
-		ei:      ei,
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
-		changes: make(chan struct{}, 1),
+		cfg:      cfg,
+		ei:       ei,
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+		changes:  make(chan struct{}, 1),
+		kwinText: kwinText,
 	}
 	go sender.run()
 	return sender, nil
@@ -224,6 +230,30 @@ func (s *Sender) KeyboardKey(keycode uint32, pressed bool) error {
 	return nil
 }
 
+// KeyboardText sends committed UTF-8 text independently of the active keymap.
+func (s *Sender) KeyboardText(text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	device := s.deviceLocked(C.EI_DEVICE_CAP_TEXT)
+	if device != nil {
+		value := C.CString(text)
+		defer C.free(unsafe.Pointer(value))
+		C.ei_device_text_utf8(device, value)
+		C.ei_device_frame(device, C.ei_now(s.ei))
+		return nil
+	}
+	if s.kwinText == nil {
+		return fmt.Errorf("%w: keyboard text", ErrNotReady)
+	}
+	for _, codepoint := range text {
+		if C.webdesktop_kwin_text_send(s.kwinText, C.uint32_t(codepoint)) == C.bool(false) {
+			return errors.New("send keyboard text through KWin")
+		}
+	}
+	return nil
+}
+
 // Close stops dispatch, ends emulation, and releases the libei context.
 func (s *Sender) Close() error {
 	s.closeOnce.Do(func() {
@@ -294,6 +324,10 @@ func (s *Sender) run() {
 	if s.ei != nil {
 		C.ei_unref(s.ei)
 		s.ei = nil
+	}
+	if s.kwinText != nil {
+		C.webdesktop_kwin_text_close(s.kwinText)
+		s.kwinText = nil
 	}
 	s.notifyLocked()
 	s.mu.Unlock()
@@ -522,3 +556,5 @@ func (s *Sender) notifyLocked() {
 	default:
 	}
 }
+
+var _ remoteinput.KeyboardTextSender = (*Sender)(nil)
