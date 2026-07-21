@@ -12,6 +12,7 @@ import (
 	"github.com/tarik02/webdesktop/desktop"
 	"github.com/tarik02/webdesktop/httpserver"
 	remoteinput "github.com/tarik02/webdesktop/input"
+	nativeauth "github.com/tarik02/webdesktop/internal/auth"
 	"github.com/tarik02/webdesktop/logging"
 	"github.com/tarik02/webdesktop/media"
 	webui "github.com/tarik02/webdesktop/web"
@@ -46,6 +47,24 @@ func New(cfg config.Config) (*App, error) {
 	}
 
 	gin.SetMode(gin.ReleaseMode)
+	sessionTTL, err := cfg.Auth.SessionDuration()
+	if err != nil {
+		_ = logger.Sync()
+		return nil, err
+	}
+	authService, err := nativeauth.New(nativeauth.Config{
+		LoginEnabled:      cfg.Auth.Login.Enabled,
+		PasswordFile:      cfg.Auth.Login.PasswordFile,
+		BearerEnabled:     cfg.Auth.Bearer.Enabled,
+		BearerTokenFile:   cfg.Auth.Bearer.TokenFile,
+		SessionTTL:        sessionTTL,
+		SecureCookie:      cfg.Auth.Session.SecureCookie,
+		TrustedProxyCIDRs: cfg.Auth.TrustedProxyCIDRs,
+	}, logger.Named("auth"))
+	if err != nil {
+		_ = logger.Sync()
+		return nil, err
+	}
 
 	portalConfig := capture.Config{
 		Source:     cfg.Video.Source,
@@ -158,7 +177,10 @@ func New(cfg config.Config) (*App, error) {
 	}
 
 	server, err := httpserver.New(cfg.Server, logger, func(router *gin.Engine) {
-		router.GET("/api/config", func(c *gin.Context) {
+		authService.Mount(router)
+		protected := router.Group("")
+		protected.Use(authService.Middleware())
+		protected.GET("/api/config", func(c *gin.Context) {
 			c.JSON(200, struct {
 				Version       int                            `json:"version"`
 				SignalingPath string                         `json:"signaling_path"`
@@ -203,7 +225,7 @@ func New(cfg config.Config) (*App, error) {
 				}{Enabled: cfg.Clipboard.Enabled},
 			})
 		})
-		router.GET("/api/status", func(c *gin.Context) {
+		protected.GET("/api/status", func(c *gin.Context) {
 			ready := false
 			select {
 			case <-desktopService.Ready():
@@ -222,7 +244,7 @@ func New(cfg config.Config) (*App, error) {
 				Video:       mediaService.Quality(),
 			})
 		})
-		router.GET(cfg.WebRTC.SignalingPath, gin.WrapH(webrtcService.Handler()))
+		protected.GET(cfg.WebRTC.SignalingPath, gin.WrapH(webrtcService.Handler()))
 		webui.Mount(router)
 	})
 	if err != nil {

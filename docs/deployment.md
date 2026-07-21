@@ -135,10 +135,52 @@ monitor source stops the shared desktop session.
 
 ## Network and security
 
-Webdesktop has no authentication or TLS. Keep the default
-`127.0.0.1:8080` listener unless another trusted layer protects the service.
-Peers with active input access can control the unlocked desktop. Enable
-`input.locking` to restrict control to one peer at a time.
+Webdesktop authentication is disabled by default. Native password login and
+bearer tokens can be enabled independently:
+
+```bash
+install -d -m 0700 "$HOME/.config/webdesktop"
+printf 'choose-a-unique-password' > "$HOME/.config/webdesktop/password"
+openssl rand -base64 32 > "$HOME/.config/webdesktop/bearer-token"
+chmod 0600 \
+  "$HOME/.config/webdesktop/password" \
+  "$HOME/.config/webdesktop/bearer-token"
+```
+
+```yaml
+auth:
+  trusted_proxy_cidrs: []
+  login:
+    enabled: true
+    password_file: /home/user/.config/webdesktop/password
+  bearer:
+    enabled: true
+    token_file: /home/user/.config/webdesktop/bearer-token
+  session:
+    ttl: 24h
+    secure_cookie: true
+```
+
+Replace `/home/user` with the service user's absolute home path. The embedded
+client accepts either configured credential and exchanges it for an in-memory
+browser session. API and non-browser WebSocket clients can instead send
+`Authorization: Bearer <token>`. Browser WebSocket APIs cannot set that header,
+so the embedded client uses its `HttpOnly` session cookie for signaling.
+
+Authentication protects `/api/config`, `/api/status`, and the configured
+WebSocket signaling path. The SPA files, `/healthz`, and authentication session
+endpoints remain public so the login screen and health probes can load. Each
+client address gets five login attempts immediately, followed by one attempt
+every three seconds. Logout, session expiry, and service restart close or
+invalidate browser-session peers. None of them changes either credential file.
+
+Webdesktop does not terminate TLS. Set `auth.session.secure_cookie: true` behind
+HTTPS. A password, bearer token, or session cookie sent over plain HTTP can be
+read by a network observer. Keep the default `127.0.0.1:8080` listener unless a
+trusted HTTPS reverse proxy, VPN, or SSH tunnel protects the connection.
+Restrict any directly bound address with a firewall. Peers with active input
+access can control the unlocked desktop. Enable `input.locking` to restrict
+control to one peer at a time.
 
 An SSH tunnel keeps the HTTP and signaling listener private:
 
@@ -148,9 +190,9 @@ ssh -N -L 8080:127.0.0.1:8080 host
 
 Then open `http://127.0.0.1:8080/`.
 
-For direct network access, configure a trusted reverse proxy or bind a LAN
-address and restrict access with a firewall. A fixed WebRTC UDP range can be
-configured on both the host and the service:
+For direct network access, configure a trusted HTTPS reverse proxy or bind a
+LAN address and restrict access with a firewall. A fixed WebRTC UDP range can
+be configured on both the host and the service:
 
 ```yaml
 webrtc:
@@ -166,6 +208,7 @@ Configure STUN or TURN for NAT traversal. TURN URLs require
 
 With an empty `webrtc.allowed_origins` list, browser WebSockets must use the
 same host as the HTTP request. Exact `http://` and `https://` origins may be
-listed. `*` allows every origin and does not authenticate clients.
+listed. Authentication cannot be enabled while this list contains `*` because
+that would weaken browser session protection.
 
 There is no clipboard, file transfer, gamepad, touch, or remote unlock.

@@ -44,6 +44,13 @@ func newServeCommand() *cobra.Command {
 	flags.StringVar(&configFile, "config", "", "path to a YAML, TOML, or JSON config file")
 	flags.String("listen-address", defaults.Server.ListenAddress, "HTTP listen address")
 	flags.String("shutdown-timeout", defaults.Server.ShutdownTimeout, "graceful shutdown timeout with unit")
+	flags.Bool("auth-login-enabled", defaults.Auth.Login.Enabled, "enable native browser login")
+	flags.String("auth-password-file", defaults.Auth.Login.PasswordFile, "path to the native login password file")
+	flags.StringSlice("auth-trusted-proxy-cidr", defaults.Auth.TrustedProxyCIDRs, "trusted reverse proxy CIDR for login rate limiting; may be repeated")
+	flags.Bool("auth-bearer-enabled", defaults.Auth.Bearer.Enabled, "accept Authorization bearer tokens")
+	flags.String("auth-bearer-token-file", defaults.Auth.Bearer.TokenFile, "path to the bearer token file")
+	flags.String("auth-session-ttl", defaults.Auth.Session.TTL, "native browser session lifetime with unit")
+	flags.Bool("auth-secure-cookie", defaults.Auth.Session.SecureCookie, "restrict browser sessions to HTTPS")
 	flags.String("log-level", defaults.Logging.Level, "log level")
 	flags.String("log-format", defaults.Logging.Format, "log format (json or console)")
 	flags.Bool("tracing-enabled", defaults.Tracing.Enabled, "enable bounded WebRTC and browser diagnostics")
@@ -85,6 +92,13 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 
 	v.SetDefault("server.listen_address", defaults.Server.ListenAddress)
 	v.SetDefault("server.shutdown_timeout", defaults.Server.ShutdownTimeout)
+	v.SetDefault("auth.login.enabled", defaults.Auth.Login.Enabled)
+	v.SetDefault("auth.login.password_file", defaults.Auth.Login.PasswordFile)
+	v.SetDefault("auth.trusted_proxy_cidrs", defaults.Auth.TrustedProxyCIDRs)
+	v.SetDefault("auth.bearer.enabled", defaults.Auth.Bearer.Enabled)
+	v.SetDefault("auth.bearer.token_file", defaults.Auth.Bearer.TokenFile)
+	v.SetDefault("auth.session.ttl", defaults.Auth.Session.TTL)
+	v.SetDefault("auth.session.secure_cookie", defaults.Auth.Session.SecureCookie)
 	v.SetDefault("logging.level", defaults.Logging.Level)
 	v.SetDefault("logging.format", defaults.Logging.Format)
 	v.SetDefault("tracing.enabled", defaults.Tracing.Enabled)
@@ -116,6 +130,13 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	for _, key := range []string{
 		"server.listen_address",
 		"server.shutdown_timeout",
+		"auth.login.enabled",
+		"auth.login.password_file",
+		"auth.trusted_proxy_cidrs",
+		"auth.bearer.enabled",
+		"auth.bearer.token_file",
+		"auth.session.ttl",
+		"auth.session.secure_cookie",
 		"logging.level",
 		"logging.format",
 		"tracing.enabled",
@@ -152,6 +173,13 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	flagBindings := map[string]string{
 		"listen-address":          "server.listen_address",
 		"shutdown-timeout":        "server.shutdown_timeout",
+		"auth-login-enabled":      "auth.login.enabled",
+		"auth-password-file":      "auth.login.password_file",
+		"auth-trusted-proxy-cidr": "auth.trusted_proxy_cidrs",
+		"auth-bearer-enabled":     "auth.bearer.enabled",
+		"auth-bearer-token-file":  "auth.bearer.token_file",
+		"auth-session-ttl":        "auth.session.ttl",
+		"auth-secure-cookie":      "auth.session.secure_cookie",
 		"log-level":               "logging.level",
 		"log-format":              "logging.format",
 		"tracing-enabled":         "tracing.enabled",

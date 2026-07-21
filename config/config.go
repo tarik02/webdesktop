@@ -35,6 +35,7 @@ const (
 // Config contains the resolved service configuration.
 type Config struct {
 	Server    Server    `mapstructure:"server" yaml:"server"`
+	Auth      Auth      `mapstructure:"auth" yaml:"auth"`
 	Logging   Logging   `mapstructure:"logging" yaml:"logging"`
 	Tracing   Tracing   `mapstructure:"tracing" yaml:"tracing"`
 	Video     Video     `mapstructure:"video" yaml:"video"`
@@ -48,6 +49,32 @@ type Config struct {
 type Server struct {
 	ListenAddress   string `mapstructure:"listen_address" yaml:"listen_address"`
 	ShutdownTimeout string `mapstructure:"shutdown_timeout" yaml:"shutdown_timeout"`
+}
+
+// Auth contains optional browser login, bearer token, and session settings.
+type Auth struct {
+	Login             AuthLogin   `mapstructure:"login" yaml:"login"`
+	Bearer            AuthBearer  `mapstructure:"bearer" yaml:"bearer"`
+	Session           AuthSession `mapstructure:"session" yaml:"session"`
+	TrustedProxyCIDRs []string    `mapstructure:"trusted_proxy_cidrs" yaml:"trusted_proxy_cidrs"`
+}
+
+// AuthLogin controls the native browser credential prompt.
+type AuthLogin struct {
+	Enabled      bool   `mapstructure:"enabled" yaml:"enabled"`
+	PasswordFile string `mapstructure:"password_file" yaml:"password_file"`
+}
+
+// AuthBearer controls Authorization bearer token access.
+type AuthBearer struct {
+	Enabled   bool   `mapstructure:"enabled" yaml:"enabled"`
+	TokenFile string `mapstructure:"token_file" yaml:"token_file"`
+}
+
+// AuthSession controls browser session cookies created after native login.
+type AuthSession struct {
+	TTL          string `mapstructure:"ttl" yaml:"ttl"`
+	SecureCookie bool   `mapstructure:"secure_cookie" yaml:"secure_cookie"`
 }
 
 // Logging contains structured logger settings.
@@ -118,6 +145,10 @@ func Defaults() Config {
 		Server: Server{
 			ListenAddress:   "127.0.0.1:8080",
 			ShutdownTimeout: "10s",
+		},
+		Auth: Auth{
+			Session:           AuthSession{TTL: "24h"},
+			TrustedProxyCIDRs: []string{},
 		},
 		Logging: Logging{
 			Level:  "info",
@@ -361,6 +392,29 @@ func (cfg Config) Validate() error {
 	if _, err := cfg.Server.ShutdownDuration(); err != nil {
 		errs = append(errs, err)
 	}
+	if cfg.Auth.Login.Enabled && cfg.Auth.Login.PasswordFile == "" {
+		errs = append(errs, errors.New("auth.login.password_file is required when native login is enabled"))
+	}
+	if cfg.Auth.Bearer.Enabled && cfg.Auth.Bearer.TokenFile == "" {
+		errs = append(errs, errors.New("auth.bearer.token_file is required when bearer authentication is enabled"))
+	}
+	if len(cfg.Auth.TrustedProxyCIDRs) > 32 {
+		errs = append(errs, errors.New("auth.trusted_proxy_cidrs must contain at most 32 entries"))
+	}
+	for _, trustedProxy := range cfg.Auth.TrustedProxyCIDRs {
+		_, network, err := net.ParseCIDR(trustedProxy)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("auth.trusted_proxy_cidrs contains invalid CIDR %q: %w", trustedProxy, err))
+			continue
+		}
+		prefixBits, _ := network.Mask.Size()
+		if prefixBits == 0 {
+			errs = append(errs, fmt.Errorf("auth.trusted_proxy_cidrs must not trust every address: %q", trustedProxy))
+		}
+	}
+	if _, err := cfg.Auth.SessionDuration(); err != nil {
+		errs = append(errs, err)
+	}
 
 	var level zapcore.Level
 	if err := level.UnmarshalText([]byte(cfg.Logging.Level)); err != nil {
@@ -438,8 +492,8 @@ func (cfg Config) Validate() error {
 		cfg.WebRTC.SignalingPath == "/" {
 		errs = append(errs, errors.New("webrtc.signaling_path must be a clean absolute path below /"))
 	}
-	if cfg.WebRTC.SignalingPath == "/healthz" {
-		errs = append(errs, errors.New("webrtc.signaling_path must not replace /healthz"))
+	if cfg.WebRTC.SignalingPath == "/healthz" || cfg.WebRTC.SignalingPath == "/api" || strings.HasPrefix(cfg.WebRTC.SignalingPath, "/api/") {
+		errs = append(errs, errors.New("webrtc.signaling_path must not replace /healthz or use the /api namespace"))
 	}
 	if cfg.WebRTC.MaxPeers < 1 || cfg.WebRTC.MaxPeers > 64 {
 		errs = append(errs, errors.New("webrtc.max_peers must be between 1 and 64"))
@@ -476,6 +530,9 @@ func (cfg Config) Validate() error {
 	}
 	for _, origin := range cfg.WebRTC.AllowedOrigins {
 		if origin == "*" {
+			if cfg.Auth.Login.Enabled || cfg.Auth.Bearer.Enabled {
+				errs = append(errs, errors.New("webrtc.allowed_origins must not contain * when authentication is enabled"))
+			}
 			continue
 		}
 		parsed, err := url.Parse(origin)
@@ -506,6 +563,26 @@ func (cfg Server) ShutdownDuration() (time.Duration, error) {
 	}
 	if duration <= 0 {
 		return 0, errors.New("server.shutdown_timeout must be positive")
+	}
+	return duration, nil
+}
+
+// SessionDuration parses the browser session lifetime.
+func (cfg Auth) SessionDuration() (time.Duration, error) {
+	switch cfg.Session.TTL {
+	case "0", "+0", "-0":
+		return 0, errors.New("auth.session.ttl must be a duration string with a unit")
+	}
+
+	duration, err := time.ParseDuration(cfg.Session.TTL)
+	if err != nil {
+		return 0, fmt.Errorf("auth.session.ttl must be a duration string with a unit: %w", err)
+	}
+	if duration <= 0 {
+		return 0, errors.New("auth.session.ttl must be positive")
+	}
+	if duration < time.Second {
+		return 0, errors.New("auth.session.ttl must be at least one second")
 	}
 	return duration, nil
 }
