@@ -242,6 +242,12 @@
                   grep -Fq \
                     "X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input" \
                     ${webdesktop}/share/applications/io.github.tarik02.webdesktop-input.desktop
+                  grep -Fq \
+                    "Exec=${webdesktop}/bin/.webdesktop-wrapped" \
+                    ${webdesktop}/share/applications/io.github.tarik02.webdesktop-input.desktop
+                  grep -Fq \
+                    "TryExec=${webdesktop}/bin/.webdesktop-wrapped" \
+                    ${webdesktop}/share/applications/io.github.tarik02.webdesktop-input.desktop
                   mkdir -p $out
                   touch $out/passed
                 '';
