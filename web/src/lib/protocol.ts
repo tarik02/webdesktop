@@ -220,6 +220,7 @@ export const controlResponseSchema = z.discriminatedUnion("type", [
         .object({
           pointer: z.boolean(),
           keyboard: z.boolean(),
+          text: z.boolean(),
         })
         .strict(),
     })

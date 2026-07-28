@@ -191,7 +191,8 @@ Successful response:
   "ok": true,
   "input": {
     "pointer": true,
-    "keyboard": true
+    "keyboard": true,
+    "text": true
   }
 }
 ```
@@ -310,8 +311,8 @@ JSON message, including the text, must fit the 4 KiB input message limit. Use
 keyboard text for text entry and IME commits. Continue to use keyboard key
 events for physical key transitions, shortcuts, and navigation keys.
 
-Keyboard text requires backend support. If the active input sender cannot
-deliver text, the server reports `input_not_ready` and revokes the input lease.
+The acquire response reports whether keyboard text is available. Clients must
+use physical keyboard events when `input.text` is false.
 
 Successful input events have no response. Errors include the decoded sequence:
 

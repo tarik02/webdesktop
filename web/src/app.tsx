@@ -77,7 +77,7 @@ export function App() {
   const viewportRef = useRef<HTMLDivElement>(null);
   const audioPlayingRef = useRef(false);
   const leaseOwnedRef = useRef(false);
-  const inputCapabilitiesRef = useRef({ pointer: false, keyboard: false });
+  const inputCapabilitiesRef = useRef({ pointer: false, keyboard: false, text: false });
   const inputAcquirePendingRef = useRef(false);
   const wheelStopRef = useRef<number | null>(null);
   const capturedPointersRef = useRef(new Set<number>());
@@ -281,7 +281,7 @@ export function App() {
       onInputLease: (owned) => {
         leaseOwnedRef.current = owned;
         if (!owned) {
-          inputCapabilitiesRef.current = { pointer: false, keyboard: false };
+          inputCapabilitiesRef.current = { pointer: false, keyboard: false, text: false };
           textKeyCodesRef.current.clear();
           deferredMetaKeyCodesRef.current.clear();
           pasteMetaKeyCodesRef.current.clear();
@@ -712,7 +712,13 @@ export function App() {
     }
     if (pressed) {
       textKeyCodesRef.current.delete(event.code);
-      if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (
+        inputCapabilitiesRef.current.text &&
+        event.key.length === 1 &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
         event.preventDefault();
         connectionRef.current?.keyboardText(event.key);
         textKeyCodesRef.current.add(event.code);

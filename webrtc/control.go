@@ -261,6 +261,7 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 			Input: &controlInput{
 				Pointer:  capabilities.Pointer,
 				Keyboard: capabilities.Keyboard,
+				Text:     capabilities.Text,
 			},
 		}) {
 			p.Close()

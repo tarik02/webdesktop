@@ -537,6 +537,7 @@ func (s *Sender) statusLocked() remoteinput.SenderStatus {
 	}
 	if s.cfg.Keyboard {
 		status.Keyboard = s.deviceLocked(C.EI_DEVICE_CAP_KEYBOARD) != nil
+		status.Text = s.deviceLocked(C.EI_DEVICE_CAP_TEXT) != nil || s.kwinText != nil
 	}
 	return status
 }
