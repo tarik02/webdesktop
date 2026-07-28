@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/cc"
+	"github.com/pion/interceptor/pkg/gcc"
 	"github.com/pion/stun/v3"
 	pion "github.com/pion/webrtc/v4"
 	"go.uber.org/zap"
@@ -21,6 +24,8 @@ const (
 	defaultSignalingWriteTimeout = 5 * time.Second
 	servicePeerCloseTimeout      = 4 * time.Second
 	opusPayloadType              = 111
+	encoderBitrateMinStepKbps    = 250
+	encoderBitrateStepDivisor    = 20
 )
 
 var (
@@ -120,10 +125,11 @@ type Service struct {
 	reservations    int
 	peers           map[*peer]struct{}
 
-	qualityMu         sync.Mutex
-	qualityChangeMu   sync.Mutex
-	qualityGeneration uint64
-	keyframeRequests  chan string
+	qualityMu          sync.Mutex
+	qualityChangeMu    sync.Mutex
+	qualityGeneration  uint64
+	encoderBitrateKbps atomic.Int64
+	keyframeRequests   chan string
 }
 
 // New constructs a reusable WebRTC service without opening listeners.
@@ -171,7 +177,7 @@ func New(
 		clipboardController = disabledClipboardController{}
 	}
 	source.SetActive(false)
-	return &Service{
+	service := &Service{
 		cfg:              cfg,
 		source:           source,
 		audio:            audio,
@@ -184,7 +190,9 @@ func New(
 		peers:            make(map[*peer]struct{}),
 		closeDone:        make(chan struct{}),
 		keyframeRequests: make(chan string, 1),
-	}, nil
+	}
+	service.encoderBitrateKbps.Store(int64(quality.BitrateKbps))
+	return service, nil
 }
 
 // Handler returns the signaling handler for mounting behind application middleware.
@@ -347,9 +355,16 @@ func (s *Service) PeerCount() int {
 }
 
 func videoCodecCapability(codec RTPCodec) pion.RTPCodecCapability {
-	feedback := make([]pion.RTCPFeedback, len(codec.RTCPFeedback))
+	feedback := make([]pion.RTCPFeedback, 0, len(codec.RTCPFeedback)+1)
+	transportCCConfigured := false
 	for index, item := range codec.RTCPFeedback {
-		feedback[index] = pion.RTCPFeedback{Type: item.Type, Parameter: item.Parameter}
+		feedback = append(feedback, pion.RTCPFeedback{Type: item.Type, Parameter: item.Parameter})
+		if codec.RTCPFeedback[index].Type == pion.TypeRTCPFBTransportCC {
+			transportCCConfigured = true
+		}
+	}
+	if !transportCCConfigured {
+		feedback = append(feedback, pion.RTCPFeedback{Type: pion.TypeRTCPFBTransportCC})
 	}
 	return pion.RTPCodecCapability{
 		MimeType:     codec.MimeType,
@@ -363,32 +378,51 @@ func videoCodecCapability(codec RTPCodec) pion.RTPCodecCapability {
 func (s *Service) newPeerConnection(
 	codec RTPCodec,
 	videoCodec pion.RTPCodecCapability,
-) (*pion.PeerConnection, error) {
+	initialBitrate int,
+) (*pion.PeerConnection, cc.BandwidthEstimator, error) {
 	mediaEngine := &pion.MediaEngine{}
 	if err := mediaEngine.RegisterCodec(pion.RTPCodecParameters{
 		RTPCodecCapability: videoCodec,
 		PayloadType:        pion.PayloadType(codec.PayloadType),
 	}, pion.RTPCodecTypeVideo); err != nil {
-		return nil, fmt.Errorf("register video codec: %w", err)
+		return nil, nil, fmt.Errorf("register video codec: %w", err)
 	}
 	if s.cfg.AudioEnabled {
 		if err := mediaEngine.RegisterCodec(pion.RTPCodecParameters{
 			RTPCodecCapability: s.audioCodec,
 			PayloadType:        opusPayloadType,
 		}, pion.RTPCodecTypeAudio); err != nil {
-			return nil, fmt.Errorf("register audio codec: %w", err)
+			return nil, nil, fmt.Errorf("register audio codec: %w", err)
 		}
 	}
 
 	registry := &interceptor.Registry{}
+	congestionController, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+		return gcc.NewSendSideBWE(
+			gcc.SendSideBWEInitialBitrate(initialBitrate),
+			gcc.SendSideBWEMinBitrate(100_000),
+			gcc.SendSideBWEPacer(gcc.NewNoOpPacer()),
+		)
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure congestion controller: %w", err)
+	}
+	estimatorReady := make(chan cc.BandwidthEstimator, 1)
+	congestionController.OnNewPeerConnection(func(_ string, estimator cc.BandwidthEstimator) {
+		estimatorReady <- estimator
+	})
+	registry.Add(congestionController)
+	if err := pion.ConfigureTWCCHeaderExtensionSender(mediaEngine, registry); err != nil {
+		return nil, nil, fmt.Errorf("configure transport-wide congestion control: %w", err)
+	}
 	if err := pion.RegisterDefaultInterceptors(mediaEngine, registry); err != nil {
-		return nil, fmt.Errorf("configure WebRTC interceptors: %w", err)
+		return nil, nil, fmt.Errorf("configure WebRTC interceptors: %w", err)
 	}
 
 	var settings pion.SettingEngine
 	if s.cfg.UDPPortMin != 0 {
 		if err := settings.SetEphemeralUDPPortRange(s.cfg.UDPPortMin, s.cfg.UDPPortMax); err != nil {
-			return nil, fmt.Errorf("set ICE UDP port range: %w", err)
+			return nil, nil, fmt.Errorf("set ICE UDP port range: %w", err)
 		}
 	}
 
@@ -411,9 +445,61 @@ func (s *Service) newPeerConnection(
 		pion.WithInterceptorRegistry(registry),
 	).NewPeerConnection(configuration)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return connection, nil
+	select {
+	case estimator := <-estimatorReady:
+		return connection, estimator, nil
+	default:
+		_ = connection.Close()
+		return nil, nil, errors.New("congestion estimator was not created")
+	}
+}
+
+func (s *Service) applyCongestionBitrateLocked() error {
+	requestedBitrateKbps := s.source.Quality().BitrateKbps
+	encoderBitrateKbps := requestedBitrateKbps
+	for _, peer := range s.peerSnapshot() {
+		peerBitrateKbps := int(peer.congestionBitrate.Load() / 1000)
+		if peerBitrateKbps < encoderBitrateKbps {
+			encoderBitrateKbps = peerBitrateKbps
+		}
+	}
+	if encoderBitrateKbps < 100 {
+		encoderBitrateKbps = 100
+	}
+	currentEncoderBitrateKbps := int(s.encoderBitrateKbps.Load())
+	if encoderBitrateKbps == currentEncoderBitrateKbps {
+		return nil
+	}
+	bitrateDifferenceKbps := encoderBitrateKbps - currentEncoderBitrateKbps
+	if bitrateDifferenceKbps < 0 {
+		bitrateDifferenceKbps = -bitrateDifferenceKbps
+	}
+	if bitrateDifferenceKbps < max(encoderBitrateMinStepKbps, currentEncoderBitrateKbps/encoderBitrateStepDivisor) {
+		return nil
+	}
+	if err := s.source.SetBitrate(encoderBitrateKbps); err != nil {
+		return err
+	}
+	s.encoderBitrateKbps.Store(int64(encoderBitrateKbps))
+	s.logger.Debug("shared encoder congestion limit updated",
+		zap.Int("requested_bitrate_kbps", requestedBitrateKbps),
+		zap.Int("encoder_bitrate_kbps", encoderBitrateKbps),
+	)
+	return nil
+}
+
+func (s *Service) updateCongestionBitrate(peer *peer, bitrate int) {
+	peer.congestionBitrate.Store(int64(bitrate))
+	if peer.isClosing() {
+		return
+	}
+	s.qualityChangeMu.Lock()
+	defer s.qualityChangeMu.Unlock()
+	if err := s.applyCongestionBitrateLocked(); err != nil {
+		peer.logger.Debug("apply congestion bitrate", zap.Error(err))
+	}
 }
 
 func (s *Service) reservePeer() (uint64, error) {
@@ -458,13 +544,22 @@ func (s *Service) releaseReservation() {
 
 func (s *Service) removePeer(peer *peer) {
 	s.peersMu.Lock()
+	removed := false
 	if _, ok := s.peers[peer]; ok {
 		delete(s.peers, peer)
+		removed = true
 		if len(s.peers) == 0 {
 			s.source.SetActive(false)
 		}
 	}
 	s.peersMu.Unlock()
+	if removed {
+		s.qualityChangeMu.Lock()
+		if err := s.applyCongestionBitrateLocked(); err != nil {
+			s.logger.Debug("restore encoder bitrate after peer closed", zap.Error(err))
+		}
+		s.qualityChangeMu.Unlock()
+	}
 }
 
 func (s *Service) peerSnapshot() []*peer {

@@ -14,8 +14,9 @@ xdg-desktop-portal
   -> WebRTC peers
 ```
 
-Pointer and keyboard events travel in the other direction through a WebRTC data
-channel and the generic input controller. The bundled desktop service connects
+Pointer motion travels through an unordered zero-retransmit WebRTC data channel.
+Buttons, scrolling, and keyboard events use a separate reliable ordered channel
+so lost motion cannot delay current input. The bundled desktop service connects
 that controller to the portal's `ConnectToEIS` file descriptor through libei;
 embedded applications can provide another input sender.
 
@@ -38,8 +39,11 @@ The portal PipeWire connection stays open for the service lifetime. Capture
 and encoding use separate GStreamer pipelines so an encoder change does not
 rebuild or pause the portal stream.
 
-The capture appsink keeps one sample. An application-owned single-frame slot
-feeds a one-buffer leaky encoder appsrc. If encoding slows down, each layer
+`pipewiresrc` negotiates DMA-BUF before system memory and retains four to eight
+capture buffers so the compositor can keep exporting frames without forced
+copies. DMA-BUF-backed samples keep their memory through the latest-frame slot
+and encoder appsrc. The capture appsink keeps one sample. An application-owned
+single-frame slot feeds a one-buffer leaky encoder appsrc. If encoding slows down, each layer
 drops obsolete raw frames instead of blocking PipeWire or accumulating stale
 video. The portal capture session stays open while the service is idle, but raw
 frames only enter the encoder while at least one WebRTC peer is registered.
@@ -48,12 +52,16 @@ frames only enter the encoder while at least one WebRTC peer is registered.
 resends the latest buffer when the compositor provides damage-driven updates,
 so an idle desktop does not stop the RTP timeline. Each encoder branch
 timestamps its input from its own monotonic pipeline clock, so a PipeWire
-timestamp regression cannot pause `videorate`. `videorate` caps each encoder branch without
-manufacturing queued duplicate frames.
+timestamp regression cannot pause `videorate`. `videorate` caps each encoder
+branch without manufacturing queued duplicate frames.
 
 Encoded samples use blocking handoff. Encoded reference chains are not dropped
-between the encoder and peer writers. There is no per-peer video queue or
-packet pacer.
+between the encoder and peer writers. Pion's GCC interceptor uses transport-wide
+congestion feedback, while RTP is emitted without its shared FIFO pacer so Opus
+cannot wait behind a large video access unit. The shared encoder uses the lowest
+active peer estimate, capped by the bitrate selected by the user. Encoder updates
+use a five-percent or 250 Kbit/s hysteresis to avoid forcing VA-API rate-control
+reconfiguration for every small GCC estimate change.
 
 ## Encoder profiles and quality changes
 
@@ -67,9 +75,10 @@ require a codec branch in the service.
 The built-in VP8 profile uses `vp8enc` with a short rate-control buffer, bounded
 intra frames, and a realtime CPU setting. The software H.264 profile uses
 `x264enc` with the ultrafast zero-latency preset. The VA-API H.264 profile uses
-`vah264enc`. Both H.264 profiles produce constrained-baseline Level 4.2 byte
-streams and advertise the libwebrtc-compatible `42e02a` profile-level
-identifier.
+`vah264enc`. Its constrained-baseline and High variants use one slice,
+macroblock rate control, and a medium quality/speed target. The High variant is
+offered separately so clients without an advertised H.264 High capability do
+not select it.
 
 All peers share one encoded stream. Clients select an advertised profile and
 option as a base, then may override resolution, frame rate, and bitrate within
@@ -96,8 +105,9 @@ Video RTP timing follows the monotonic production gap between encoded access
 units. GStreamer PTS remains available for diagnostics but does not control the
 RTP clock across encoder replacements.
 
-The service reads RTCP from every sender. PLI, FIR, and a newly connected peer
-request a keyframe from the active encoder. Pion keeps recent RTP packets for
+The service reads RTCP from every sender. Transport-cc reports drive pacing and
+encoder bitrate. PLI, FIR, and a newly connected peer request a keyframe from
+the active encoder. Pion keeps recent RTP packets for
 NACK retransmission and emits sender reports that map RTP clocks to NTP time.
 
 A new peer ignores inter-frames until it receives a decodable keyframe.
@@ -108,6 +118,10 @@ Optional audio uses `pulsesrc` against a PipeWire PulseAudio monitor, converts
 to stereo S16LE at 48 kHz, and encodes 20 ms Opus frames. Audio and video share
 the same WebRTC media stream ID. Their independent capture pipelines are not
 calibrated for sample-accurate lip sync.
+
+The embedded client requests a 10 ms browser jitter-buffer target for both
+receivers. Applying the same target to audio and video keeps lip sync from
+forcing the video receiver back to Chromium's larger default queue.
 
 ## Embedding
 

@@ -18,6 +18,7 @@ import {
 const maxPointerBufferedAmount = 16 * 1024;
 const maxTraceQueueSize = 64;
 const traceStatsInterval = 5000;
+const jitterBufferTargetMs = 10;
 
 const inboundVideoStatsSchema = z
   .object({
@@ -125,6 +126,7 @@ export class DesktopConnection {
   private socket: WebSocket | null = null;
   private control: RTCDataChannel | null = null;
   private input: RTCDataChannel | null = null;
+  private inputMotion: RTCDataChannel | null = null;
   private clipboard: RTCDataChannel | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private pendingControl = new Map<string, PendingControl>();
@@ -136,6 +138,7 @@ export class DesktopConnection {
   private pressedButtons = new Set<"primary" | "middle" | "secondary" | "back" | "forward">();
   private nextRequestID = 1;
   private nextSequence = 1;
+  private nextMotionSequence = 1;
   private leaseOwned = false;
   private closing = false;
   private reportedConnected = false;
@@ -235,6 +238,7 @@ export class DesktopConnection {
     this.pc = pc;
 
     const videoTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
+    videoTransceiver.receiver.jitterBufferTarget = jitterBufferTargetMs;
     const capabilities = RTCRtpReceiver.getCapabilities("video");
     if (!capabilities) {
       throw new Error("browser did not report video codec capabilities");
@@ -243,25 +247,43 @@ export class DesktopConnection {
     if (!profile) {
       throw new Error(`video profile ${this.config.video.profile} is unavailable`);
     }
-    const preferredCodecs = capabilities.codecs.filter(
-      (codec) => codec.mimeType.toLowerCase() === profile.codec.mime_type.toLowerCase(),
-    );
+    const configuredH264Profile = profile.codec.sdp_fmtp_line
+      .match(/(?:^|;)profile-level-id=([0-9a-f]{2})/i)?.[1]
+      ?.toLowerCase();
+    const preferredCodecs = capabilities.codecs.filter((codec) => {
+      if (codec.mimeType.toLowerCase() !== profile.codec.mime_type.toLowerCase()) {
+        return false;
+      }
+      if (!configuredH264Profile) {
+        return true;
+      }
+      return (
+        codec.sdpFmtpLine?.match(/(?:^|;)profile-level-id=([0-9a-f]{2})/i)?.[1]?.toLowerCase() ===
+        configuredH264Profile
+      );
+    });
     if (preferredCodecs.length === 0) {
       throw new Error(`browser does not support ${profile.label}`);
     }
     videoTransceiver.setCodecPreferences(preferredCodecs);
 
     if (this.config.audio.enabled) {
-      pc.addTransceiver("audio", { direction: "recvonly" });
+      const audioTransceiver = pc.addTransceiver("audio", { direction: "recvonly" });
+      audioTransceiver.receiver.jitterBufferTarget = jitterBufferTargetMs;
     }
 
     const control = pc.createDataChannel("control", { ordered: true });
     const input = pc.createDataChannel("input", { ordered: true });
+    const inputMotion = pc.createDataChannel("input-motion", {
+      ordered: false,
+      maxRetransmits: 0,
+    });
     const clipboard = this.config.clipboard.enabled
       ? pc.createDataChannel("clipboard", { ordered: true })
       : null;
     this.control = control;
     this.input = input;
+    this.inputMotion = inputMotion;
     this.clipboard = clipboard;
     if (clipboard) {
       clipboard.binaryType = "arraybuffer";
@@ -327,6 +349,43 @@ export class DesktopConnection {
         const text = z.string().parse(event.data);
         const response = inputResponseSchema.parse(JSON.parse(text));
         this.trace("warn", "input.response-error", {
+          error_code: response.error.code,
+          message: response.error.message,
+          has_sequence: String(response.sequence !== undefined),
+        });
+        this.callbacks.onInputError(`${response.error.code}: ${response.error.message}`);
+        if (
+          response.error.code === "input_overloaded" ||
+          response.error.code === "input_unavailable"
+        ) {
+          this.leaseOwned = false;
+          this.callbacks.onInputLease(false);
+        }
+      } catch (error) {
+        this.fail(error);
+      }
+    });
+
+    inputMotion.addEventListener("open", () => {
+      this.trace("info", "data-channel.open", { channel: "input-motion" });
+      this.updateConnected();
+    });
+    inputMotion.addEventListener("close", () => {
+      this.trace("warn", "data-channel.close", { channel: "input-motion" });
+      this.leaseOwned = false;
+      this.callbacks.onInputLease(false);
+    });
+    inputMotion.addEventListener("error", () => {
+      this.trace("error", "data-channel.error", { channel: "input-motion" });
+      this.leaseOwned = false;
+      this.callbacks.onInputLease(false);
+    });
+    inputMotion.addEventListener("message", (event) => {
+      try {
+        const text = z.string().parse(event.data);
+        const response = inputResponseSchema.parse(JSON.parse(text));
+        this.trace("warn", "input.response-error", {
+          channel: "input-motion",
           error_code: response.error.code,
           message: response.error.message,
           has_sequence: String(response.sequence !== undefined),
@@ -781,21 +840,26 @@ export class DesktopConnection {
         candidatePair?.currentRoundTripTime === undefined
           ? null
           : candidatePair.currentRoundTripTime * 1000,
-      inputBufferedBytes: this.input?.bufferedAmount ?? 0,
+      inputBufferedBytes:
+        (this.input?.bufferedAmount ?? 0) + (this.inputMotion?.bufferedAmount ?? 0),
     };
   }
 
-  pointerAbsolute(x: number, y: number) {
-    if ((this.input?.bufferedAmount ?? 0) > maxPointerBufferedAmount) {
+  pointerAbsolute(x: number, y: number, reliable = false) {
+    const channel = reliable ? this.input : this.inputMotion;
+    if ((channel?.bufferedAmount ?? 0) > maxPointerBufferedAmount) {
       return;
     }
-    this.sendInput({
-      version: 1,
-      sequence: this.nextInputSequence(),
-      type: "input.pointer.motion.absolute",
-      x,
-      y,
-    });
+    this.sendInput(
+      {
+        version: 1,
+        sequence: reliable ? this.nextInputSequence() : this.nextMotionInputSequence(),
+        type: "input.pointer.motion.absolute",
+        x,
+        y,
+      },
+      channel,
+    );
   }
 
   pointerButton(button: "primary" | "middle" | "secondary" | "back" | "forward", pressed: boolean) {
@@ -1155,11 +1219,11 @@ export class DesktopConnection {
     });
   }
 
-  private sendInput(message: InputMessage) {
+  private sendInput(message: InputMessage, selectedChannel?: RTCDataChannel | null) {
     if (!this.leaseOwned) {
       return;
     }
-    const channel = this.input;
+    const channel = selectedChannel === undefined ? this.input : selectedChannel;
     if (!channel || channel.readyState !== "open") {
       return;
     }
@@ -1171,6 +1235,7 @@ export class DesktopConnection {
       this.pc?.connectionState === "connected" &&
       this.control?.readyState === "open" &&
       this.input?.readyState === "open" &&
+      this.inputMotion?.readyState === "open" &&
       (!this.config.clipboard.enabled || this.clipboard?.readyState === "open")
     ) {
       if (this.reportedConnected) {
@@ -1234,11 +1299,13 @@ export class DesktopConnection {
     this.callbacks.onInputLease(false);
     this.control?.close();
     this.input?.close();
+    this.inputMotion?.close();
     this.clipboard?.close();
     this.pc?.close();
     this.socket?.close(1000, "client disconnect");
     this.control = null;
     this.input = null;
+    this.inputMotion = null;
     this.clipboard = null;
     this.clipboardReceive = null;
     this.clipboardSend = Promise.resolve();
@@ -1337,6 +1404,12 @@ export class DesktopConnection {
   private nextInputSequence() {
     const sequence = this.nextSequence;
     this.nextSequence += 1;
+    return sequence;
+  }
+
+  private nextMotionInputSequence() {
+    const sequence = this.nextMotionSequence;
+    this.nextMotionSequence += 1;
     return sequence;
   }
 }

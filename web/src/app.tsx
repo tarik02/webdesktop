@@ -80,8 +80,6 @@ export function App() {
   const inputCapabilitiesRef = useRef({ pointer: false, keyboard: false });
   const inputAcquirePendingRef = useRef(false);
   const wheelStopRef = useRef<number | null>(null);
-  const pointerMotionFrameRef = useRef<number | null>(null);
-  const pendingPointerRef = useRef<{ x: number; y: number } | null>(null);
   const capturedPointersRef = useRef(new Set<number>());
   const textKeyCodesRef = useRef(new Set<string>());
   const deferredMetaKeyCodesRef = useRef(new Set<string>());
@@ -112,11 +110,6 @@ export function App() {
 
     return () => {
       active = false;
-      if (pointerMotionFrameRef.current !== null) {
-        window.cancelAnimationFrame(pointerMotionFrameRef.current);
-        pointerMotionFrameRef.current = null;
-      }
-      pendingPointerRef.current = null;
       connectionRef.current?.disposeImmediately();
     };
   }, []);
@@ -211,11 +204,6 @@ export function App() {
   useEffect(() => {
     const release = (cause: "window-blur" | "visibility-hidden") => {
       connectionRef.current?.trace("info", "input.cleanup", { cause });
-      if (pointerMotionFrameRef.current !== null) {
-        window.cancelAnimationFrame(pointerMotionFrameRef.current);
-        pointerMotionFrameRef.current = null;
-      }
-      pendingPointerRef.current = null;
       void connectionRef.current?.releaseInput().catch((cause) => {
         setError(errorMessage(cause));
       });
@@ -341,11 +329,6 @@ export function App() {
   };
 
   const disconnect = async () => {
-    if (pointerMotionFrameRef.current !== null) {
-      window.cancelAnimationFrame(pointerMotionFrameRef.current);
-      pointerMotionFrameRef.current = null;
-    }
-    pendingPointerRef.current = null;
     const connection = connectionRef.current;
     connectionRef.current = null;
     if (!connection) {
@@ -453,11 +436,6 @@ export function App() {
   };
 
   const releaseInput = async () => {
-    if (pointerMotionFrameRef.current !== null) {
-      window.cancelAnimationFrame(pointerMotionFrameRef.current);
-      pointerMotionFrameRef.current = null;
-    }
-    pendingPointerRef.current = null;
     inputAcquirePendingRef.current = false;
     textKeyCodesRef.current.clear();
     deferredMetaKeyCodesRef.current.clear();
@@ -531,17 +509,7 @@ export function App() {
     if (!point) {
       return;
     }
-    pendingPointerRef.current = point;
-    if (pointerMotionFrameRef.current === null) {
-      pointerMotionFrameRef.current = window.requestAnimationFrame(() => {
-        pointerMotionFrameRef.current = null;
-        const pending = pendingPointerRef.current;
-        pendingPointerRef.current = null;
-        if (pending && leaseOwnedRef.current) {
-          connectionRef.current?.pointerAbsolute(pending.x, pending.y);
-        }
-      });
-    }
+    connectionRef.current?.pointerAbsolute(point.x, point.y);
   };
 
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
@@ -557,8 +525,7 @@ export function App() {
     event.preventDefault();
     const point = normalizedPoint(event);
     if (point) {
-      pendingPointerRef.current = null;
-      connectionRef.current?.pointerAbsolute(point.x, point.y);
+      connectionRef.current?.pointerAbsolute(point.x, point.y, true);
     }
     const button = pointerButtons[event.button];
     if (button) {
@@ -575,8 +542,7 @@ export function App() {
     event.preventDefault();
     const point = normalizedPoint(event);
     if (point) {
-      pendingPointerRef.current = null;
-      connectionRef.current?.pointerAbsolute(point.x, point.y);
+      connectionRef.current?.pointerAbsolute(point.x, point.y, true);
     }
     const button = pointerButtons[event.button];
     if (button) {
@@ -590,11 +556,6 @@ export function App() {
       return;
     }
     connectionRef.current?.trace("debug", "pointer-capture.lost");
-    if (pointerMotionFrameRef.current !== null) {
-      window.cancelAnimationFrame(pointerMotionFrameRef.current);
-      pointerMotionFrameRef.current = null;
-    }
-    pendingPointerRef.current = null;
     connectionRef.current?.releasePressed();
   };
 

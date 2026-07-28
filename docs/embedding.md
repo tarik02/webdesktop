@@ -8,7 +8,7 @@ Create a `webrtc.Service` with application-owned implementations of these
 contracts:
 
 - `MediaSource` supplies encoded VP8 or H.264 access units, quality metadata,
-  live quality updates, and keyframe requests.
+  live quality updates, congestion-limited bitrate updates, and keyframe requests.
 - `AudioSource` supplies encoded Opus frames when audio is enabled.
 - `InputController` owns peer leases and receives validated input events.
 - `ClipboardController` synchronizes clipboard content when enabled.

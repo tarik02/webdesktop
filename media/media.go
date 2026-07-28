@@ -447,6 +447,36 @@ func (s *Service) UpdateQuality(quality Quality) error {
 	return nil
 }
 
+// SetBitrate changes the encoder rate without changing the user-requested quality.
+func (s *Service) SetBitrate(bitrateKbps int) error {
+	if bitrateKbps < MinBitrateKbps {
+		return fmt.Errorf("video bitrate must be at least %d Kbit/s", MinBitrateKbps)
+	}
+
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+
+	s.mu.Lock()
+	if !s.running || s.pipeline == nil || s.source == nil {
+		s.mu.Unlock()
+		return errors.New("media service is not running")
+	}
+	pipeline := s.pipeline
+	requestedBitrateKbps := s.quality.BitrateKbps
+	s.mu.Unlock()
+	if bitrateKbps > requestedBitrateKbps {
+		return fmt.Errorf("encoder bitrate must not exceed requested bitrate %d Kbit/s", requestedBitrateKbps)
+	}
+	if err := pipeline.SetBitrate(bitrateKbps); err != nil {
+		return fmt.Errorf("update congestion-limited encoder bitrate: %w", err)
+	}
+	s.logger.Debug("video congestion bitrate updated",
+		zap.Int("requested_bitrate_kbps", requestedBitrateKbps),
+		zap.Int("encoder_bitrate_kbps", bitrateKbps),
+	)
+	return nil
+}
+
 // RequestKeyframe asks the active encoder to emit a new independently decodable frame.
 func (s *Service) RequestKeyframe() error {
 	s.mu.Lock()

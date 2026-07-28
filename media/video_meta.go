@@ -21,6 +21,8 @@ static GstSample *webdesktop_video_sample_normalize(void *sample_ptr) {
 
 	if (source_buffer == NULL || caps == NULL || !gst_video_info_from_caps(&info, caps))
 		return NULL;
+	if (gst_caps_features_contains(gst_caps_get_features(caps, 0), "memory:DMABuf"))
+		return gst_sample_ref(sample);
 
 	meta = gst_buffer_get_video_meta(source_buffer);
 	if (meta == NULL) {

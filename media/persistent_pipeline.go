@@ -806,19 +806,19 @@ func newPersistentVideoPipeline(
 	if err := source.SetProperty("provide-clock", false); err != nil {
 		return nil, fmt.Errorf("disable pipewiresrc pipeline clock: %w", err)
 	}
-	if err := source.SetProperty("always-copy", true); err != nil {
-		return nil, fmt.Errorf("copy pipewiresrc buffers: %w", err)
+	if err := source.SetProperty("always-copy", false); err != nil {
+		return nil, fmt.Errorf("enable zero-copy pipewiresrc buffers: %w", err)
 	}
-	if err := source.SetProperty("min-buffers", 2); err != nil {
+	if err := source.SetProperty("min-buffers", 4); err != nil {
 		return nil, fmt.Errorf("set minimum PipeWire capture buffers: %w", err)
 	}
-	if err := source.SetProperty("max-buffers", 4); err != nil {
+	if err := source.SetProperty("max-buffers", 8); err != nil {
 		return nil, fmt.Errorf("set maximum PipeWire capture buffers: %w", err)
 	}
 	if err := source.SetProperty("keepalive-time", 1000/quality.Framerate); err != nil {
 		return nil, fmt.Errorf("set pipewiresrc frame keepalive: %w", err)
 	}
-	captureCaps := gst.NewCapsFromString("video/x-raw")
+	captureCaps := gst.NewCapsFromString("video/x-raw(memory:DMABuf);video/x-raw")
 	if captureCaps == nil {
 		return nil, errors.New("create PipeWire capture caps")
 	}

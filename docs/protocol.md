@@ -5,6 +5,7 @@ clipboard messages use version 1. The client creates these WebRTC data channels:
 
 - `control`, reliable and ordered
 - `input`, reliable and ordered
+- `input-motion`, unordered with zero retransmits
 - `clipboard`, reliable and ordered when clipboard synchronization is enabled
 
 One WebSocket owns one peer connection. It accepts one offer and does not
@@ -21,6 +22,7 @@ The client offer must include:
 - a recv-only video transceiver
 - a reliable ordered `control` data channel
 - a reliable ordered `input` data channel when remote input is needed
+- an unordered `input-motion` data channel with `maxRetransmits: 0` when remote input is needed
 - a reliable ordered `clipboard` data channel when clipboard synchronization is enabled
 - an active Opus audio media section when server audio is enabled
 
@@ -209,13 +211,16 @@ peer receives `input_busy`. Other acquisition errors include `input_disabled`,
 `input_not_ready`, `input_channel_required`, and unauthorized pointer or
 keyboard classes.
 
-Closing either data channel, closing the peer, portal shutdown, overload, or
+Closing either input data channel, closing the peer, portal shutdown, overload, or
 service shutdown releases that peer's input access and any held keys or buttons.
 
-## Input channel
+## Input channels
 
 Input messages are UTF-8 JSON text up to 4 KiB. Each message needs a sequence
-greater than zero and larger than the previous valid sequence on that channel.
+greater than zero and larger than the previous valid sequence on its channel.
+The reliable `input` channel carries buttons, scrolling, keyboard events, and
+click-position motion. The `input-motion` channel carries only absolute or
+relative pointer motion. Lost or delayed motion never blocks later motion.
 
 ### Absolute pointer motion
 
@@ -332,7 +337,8 @@ state, and closes the input channel.
 
 The server rejects unknown fields, missing required fields, `null` in required
 fields, multiple JSON values, binary messages, invalid UTF-8, oversized
-messages, and unordered or partial-reliable data channels.
+messages, incorrectly configured data channels, and non-motion messages on
+`input-motion`.
 
 
 ## Clipboard channel

@@ -144,6 +144,7 @@ type MediaSource interface {
 	Quality() Quality
 	Profile(string) (EncoderProfile, bool)
 	UpdateQuality(Quality) error
+	SetBitrate(int) error
 	RequestKeyframe() error
 	SetActive(bool)
 }

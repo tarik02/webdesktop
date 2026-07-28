@@ -98,6 +98,10 @@ func (adapter *mediaSourceAdapter) UpdateQuality(quality rtc.Quality) error {
 	})
 }
 
+func (adapter *mediaSourceAdapter) SetBitrate(bitrateKbps int) error {
+	return adapter.source.SetBitrate(bitrateKbps)
+}
+
 func (adapter *mediaSourceAdapter) RequestKeyframe() error {
 	return adapter.source.RequestKeyframe()
 }

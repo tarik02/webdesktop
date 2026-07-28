@@ -6,7 +6,7 @@ uses Pion for WebRTC. There is no X11 capture path or fallback.
 
 ## Features
 
-- Runtime-configurable VP8, software H.264, and VA-API H.264 encoder profiles
+- Runtime-configurable VP8, software H.264, and VA-API H.264 baseline/High encoder profiles
 - Low-latency newest-frame pipeline with bounded queues
 - Server-defined quality presets with client-side resolution, frame-rate, and bitrate overrides
 - Optional Opus desktop audio

@@ -24,9 +24,10 @@ const (
 	VideoCursorModeHidden   = "hidden"
 	VideoCursorModeEmbedded = "embedded"
 
-	VideoProfileVP8          = "vp8"
-	VideoProfileH264VAAPI    = "h264-vaapi"
-	VideoProfileH264Software = "h264-software"
+	VideoProfileVP8           = "vp8"
+	VideoProfileH264VAAPI     = "h264-vaapi"
+	VideoProfileH264VAAPIHigh = "h264-vaapi-high"
+	VideoProfileH264Software  = "h264-software"
 
 	AudioDefaultMonitor = media.DefaultAudioMonitor
 	opusPayloadType     = 111
@@ -163,6 +164,7 @@ func DefaultVideoProfiles() map[string]media.EncoderProfile {
 		{Type: "nack"},
 		{Type: "nack", Parameter: "pli"},
 		{Type: "ccm", Parameter: "fir"},
+		{Type: "transport-cc"},
 	}
 	h264Codec := media.RTPCodec{
 		ID:           "h264",
@@ -182,13 +184,37 @@ func DefaultVideoProfiles() map[string]media.EncoderProfile {
 			},
 		},
 	}
+	h264HighCodec := media.RTPCodec{
+		ID:           "h264-high",
+		MimeType:     "video/H264",
+		ClockRate:    90000,
+		PayloadType:  102,
+		Payloader:    media.PayloaderH264,
+		SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64002a",
+		RTCPFeedback: feedback,
+		SDP: media.SDPRequirements{
+			OfferFmtp: map[string]string{
+				"packetization-mode": "^1$",
+				"profile-level-id":   "(?i)^640[0c][0-9a-f]{2}$",
+			},
+			AnswerFmtp: map[string]string{
+				"profile-level-id": "64002a",
+			},
+		},
+	}
 	h264Limits := media.QualityLimits{
 		MaxBitrateKbps:             50000,
 		MaxMacroblocksPerDimension: 543,
 		MaxMacroblocksPerFrame:     36864,
 		MaxMacroblocksPerSecond:    983040,
 	}
-	qualityOptions := func() map[string]media.QualityOption {
+	h264HighLimits := media.QualityLimits{
+		MaxBitrateKbps:             50000,
+		MaxMacroblocksPerDimension: 263,
+		MaxMacroblocksPerFrame:     8704,
+		MaxMacroblocksPerSecond:    522240,
+	}
+	qualityOptions := func(highBitrateKbps, maximumBitrateKbps int) map[string]media.QualityOption {
 		return map[string]media.QualityOption{
 			"low": {
 				Label:       "720p 30 FPS",
@@ -209,14 +235,14 @@ func DefaultVideoProfiles() map[string]media.EncoderProfile {
 				Width:       1920,
 				Height:      1080,
 				Framerate:   60,
-				BitrateKbps: 8000,
+				BitrateKbps: highBitrateKbps,
 			},
 			"maximum": {
 				Label:       "1080p 60 FPS",
 				Width:       1920,
 				Height:      1080,
 				Framerate:   60,
-				BitrateKbps: 10000,
+				BitrateKbps: maximumBitrateKbps,
 			},
 		}
 	}
@@ -224,7 +250,7 @@ func DefaultVideoProfiles() map[string]media.EncoderProfile {
 		VideoProfileVP8: {
 			Label:             "VP8",
 			DefaultOption:     "balanced",
-			Options:           qualityOptions(),
+			Options:           qualityOptions(8000, 10000),
 			FrontendTransform: media.FrontendTransformNone,
 			EncoderElement:    "encoder",
 			Pipeline: `videoconvert !
@@ -270,7 +296,7 @@ video/x-vp8`,
 		VideoProfileH264VAAPI: {
 			Label:             "H.264 (VA-API)",
 			DefaultOption:     "balanced",
-			Options:           qualityOptions(),
+			Options:           qualityOptions(12000, 20000),
 			FrontendTransform: media.FrontendTransformNone,
 			EncoderElement:    "encoder",
 			Pipeline: `vapostproc name={{ element "postproc" }} qos=true scale-method=fast !
@@ -282,10 +308,10 @@ vah264enc name={{ element "encoder" }}
   b-frames=0
   cabac=false
   dct8x8=false
-  mbbrc=disabled
-  num-slices=4
+  mbbrc=auto
+  num-slices=1
   ref-frames=1
-  target-usage=6
+  target-usage=4
   rate-control=cbr
   cc-insert=false !
 h264parse name={{ element "parser" }} config-interval=-1 !
@@ -307,10 +333,50 @@ video/x-h264,stream-format=byte-stream,alignment=au,profile=constrained-baseline
 			Codec:  h264Codec,
 			Limits: h264Limits,
 		},
+		VideoProfileH264VAAPIHigh: {
+			Label:             "H.264 High (VA-API)",
+			DefaultOption:     "balanced",
+			Options:           qualityOptions(12000, 20000),
+			FrontendTransform: media.FrontendTransformNone,
+			EncoderElement:    "encoder",
+			Pipeline: `vapostproc name={{ element "postproc" }} qos=true scale-method=fast !
+video/x-raw(memory:VAMemory),format=NV12,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
+vah264enc name={{ element "encoder" }}
+  bitrate={{ .BitrateKbps }}
+  cpb-size={{ ceilDiv (mul .BitrateKbps 3) .Framerate }}
+  key-int-max={{ .KeyframeInterval }}
+  b-frames=0
+  cabac=true
+  dct8x8=true
+  mbbrc=auto
+  num-slices=1
+  ref-frames=1
+  target-usage=4
+  rate-control=cbr
+  cc-insert=false !
+h264parse name={{ element "parser" }} config-interval=-1 !
+video/x-h264,stream-format=byte-stream,alignment=au,profile=high`,
+			Bitrate: []media.EncoderProperty{
+				{
+					Element:  "encoder",
+					Property: "cpb-size",
+					Type:     media.PropertyTypeUint,
+					Value:    `{{ ceilDiv (mul .BitrateKbps 3) .Framerate }}`,
+				},
+				{
+					Element:  "encoder",
+					Property: "bitrate",
+					Type:     media.PropertyTypeUint,
+					Value:    `{{ .BitrateKbps }}`,
+				},
+			},
+			Codec:  h264HighCodec,
+			Limits: h264HighLimits,
+		},
 		VideoProfileH264Software: {
 			Label:             "H.264 (software)",
 			DefaultOption:     "balanced",
-			Options:           qualityOptions(),
+			Options:           qualityOptions(8000, 10000),
 			FrontendTransform: media.FrontendTransformNone,
 			EncoderElement:    "encoder",
 			Pipeline: `videoconvert !
