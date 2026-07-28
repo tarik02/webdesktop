@@ -40,19 +40,22 @@ The complete default file is [webdesktop.example.yaml](../webdesktop.example.yam
 | `video.tuning.threads` | `8` | Encoder threads, 1 through 64 |
 | `video.tuning.keyframe_interval` | `60` | Frames, 1 through 600 |
 | `video.tuning.vp8_cpu_used` | `16` | VP8 speed setting, 0 through 16 |
-| `video.profiles` | three built-ins | Encoder pipeline, bitrate updates, codec metadata, and limits |
+| `video.profiles` | four built-ins | Encoder pipeline, bitrate updates, codec metadata, and limits |
 
 The built-in profiles are:
 
 - `vp8`, software VP8 with `vp8enc`
 - `h264-software`, software H.264 with `x264enc`
 - `h264-vaapi`, VA-API H.264 with `vah264enc`
+- `h264-vaapi-high`, VA-API H.264 High with `vah264enc`
 
 Defining `video.profiles` replaces the built-in profile map.
 
-VP8 remains the default. Both H.264 profiles produce constrained-baseline Level
-4.2 byte streams and use the same WebRTC codec metadata. Their quality must stay
-within all of these limits:
+VP8 remains the default. The software and baseline VA-API profiles use the same
+WebRTC codec metadata. The VA-API High profile uses separate metadata and is
+available only when the browser advertises H.264 High. The default High options
+use 12000 Kbit/s at 1080p60 and 20000 Kbit/s for maximum quality. Its quality
+must stay within all of these Level 4.2 limits:
 
 - 263 rounded macroblocks in either dimension
 - 8704 macroblocks per frame
@@ -67,9 +70,9 @@ resolution, frame rate, and bitrate. The server checks the effective values
 against generic bounds and the profile's limits. A bitrate-only change updates
 the active encoder through the profile's configured properties. Other changes
 start a replacement encoder and switch after its first keyframe. Switching
-between the two H.264 profiles keeps the existing peer connection because their
-codec metadata is identical. Switching between H.264 and VP8 requires a new SDP
-exchange, so the embedded client reconnects.
+between software and baseline VA-API H.264 keeps the existing peer connection.
+Switching to H.264 High or between H.264 and VP8 requires a new SDP exchange, so
+the embedded client reconnects.
 
 ### Encoder profile definitions
 

@@ -88,6 +88,8 @@ video:
             parameter: pli
           - type: ccm
             parameter: fir
+          - type: transport-cc
+            parameter: ""
         sdp:
           offer_fmtp: {}
           answer_fmtp: {}
@@ -118,13 +120,13 @@ video:
           width: 1920
           height: 1080
           framerate: 60
-          bitrate_kbps: 8000
+          bitrate_kbps: 12000
         maximum:
           label: 1080p 60 FPS
           width: 1920
           height: 1080
           framerate: 60
-          bitrate_kbps: 10000
+          bitrate_kbps: 20000
       encoder_element: encoder
       pipeline: >-
         vapostproc name={{ element "postproc" }} qos=true scale-method=fast !
@@ -136,10 +138,10 @@ video:
         b-frames=0
         cabac=false
         dct8x8=false
-        mbbrc=disabled
-        num-slices=4
+        mbbrc=auto
+        num-slices=1
         ref-frames=1
-        target-usage=6
+        target-usage=4
         rate-control=cbr
         cc-insert=false !
         h264parse name={{ element "parser" }} config-interval=-1 !
@@ -168,12 +170,99 @@ video:
             parameter: pli
           - type: ccm
             parameter: fir
+          - type: transport-cc
+            parameter: ""
         sdp:
           offer_fmtp:
             packetization-mode: ^1$
             profile-level-id: (?i)^42e0[0-9a-f]{2}$
           answer_fmtp:
             profile-level-id: 42e02a
+      limits:
+        max_bitrate_kbps: 50000
+        max_macroblocks_per_dimension: 263
+        max_macroblocks_per_frame: 8704
+        max_macroblocks_per_second: 522240
+    h264-vaapi-high:
+      label: H.264 High (VA-API)
+      default_option: balanced
+      frontend_transform: none
+      options:
+        low:
+          label: 720p 30 FPS
+          width: 1280
+          height: 720
+          framerate: 30
+          bitrate_kbps: 2500
+        balanced:
+          label: 1080p 30 FPS
+          width: 1920
+          height: 1080
+          framerate: 30
+          bitrate_kbps: 4000
+        high:
+          label: 1080p 60 FPS
+          width: 1920
+          height: 1080
+          framerate: 60
+          bitrate_kbps: 12000
+        maximum:
+          label: 1080p 60 FPS
+          width: 1920
+          height: 1080
+          framerate: 60
+          bitrate_kbps: 20000
+      encoder_element: encoder
+      pipeline: >-
+        vapostproc name={{ element "postproc" }} qos=true scale-method=fast !
+        video/x-raw(memory:VAMemory),format=NV12,width={{ .Width }},height={{ .Height }},framerate={{ .Framerate }}/1 !
+        vah264enc name={{ element "encoder" }}
+        bitrate={{ .BitrateKbps }}
+        cpb-size={{ ceilDiv (mul .BitrateKbps 3) .Framerate }}
+        key-int-max={{ .KeyframeInterval }}
+        b-frames=0
+        cabac=true
+        dct8x8=true
+        mbbrc=auto
+        num-slices=1
+        ref-frames=1
+        target-usage=4
+        rate-control=cbr
+        cc-insert=false !
+        h264parse name={{ element "parser" }} config-interval=-1 !
+        video/x-h264,stream-format=byte-stream,alignment=au,profile=high
+      bitrate:
+        - element: encoder
+          property: cpb-size
+          type: uint
+          value: "{{ ceilDiv (mul .BitrateKbps 3) .Framerate }}"
+        - element: encoder
+          property: bitrate
+          type: uint
+          value: "{{ .BitrateKbps }}"
+      codec:
+        id: h264-high
+        mime_type: video/H264
+        clock_rate: 90000
+        channels: 0
+        payload_type: 102
+        payloader: h264
+        sdp_fmtp_line: level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64002a
+        rtcp_feedback:
+          - type: nack
+            parameter: ""
+          - type: nack
+            parameter: pli
+          - type: ccm
+            parameter: fir
+          - type: transport-cc
+            parameter: ""
+        sdp:
+          offer_fmtp:
+            packetization-mode: ^1$
+            profile-level-id: (?i)^640[0c][0-9a-f]{2}$
+          answer_fmtp:
+            profile-level-id: 64002a
       limits:
         max_bitrate_kbps: 50000
         max_macroblocks_per_dimension: 263
@@ -250,6 +339,8 @@ video:
             parameter: pli
           - type: ccm
             parameter: fir
+          - type: transport-cc
+            parameter: ""
         sdp:
           offer_fmtp:
             packetization-mode: ^1$

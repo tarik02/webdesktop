@@ -58,6 +58,7 @@ type peer struct {
 	closing            atomic.Bool
 	connected          atomic.Bool
 	videoNeedsKeyframe atomic.Bool
+	congestionBitrate  atomic.Int64
 
 	signalWriteMu    sync.Mutex
 	controlWriteMu   sync.Mutex
@@ -75,12 +76,16 @@ type peer struct {
 	control                  *pion.DataChannel
 	inputMu                  sync.Mutex
 	input                    *pion.DataChannel
+	inputMotion              *pion.DataChannel
 	clipboardMu              sync.Mutex
 	clipboardState           *clipboardChannelState
 	clipboardSequence        uint64
 	inputSequence            uint64
 	inputSequenceSet         bool
+	inputMotionSequence      uint64
+	inputMotionSequenceSet   bool
 	inputChannelGeneration   uint64
+	inputMotionGeneration    uint64
 	inputLeaseGeneration     uint64
 
 	videoSamplesSeen     atomic.Uint64
@@ -150,7 +155,11 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		return nil, fmt.Errorf("media profile %q is unavailable", quality.Profile)
 	}
 	videoCodec := videoCodecCapability(profile.Codec)
-	peerConnection, err := s.newPeerConnection(profile.Codec, videoCodec)
+	peerConnection, estimator, err := s.newPeerConnection(
+		profile.Codec,
+		videoCodec,
+		quality.BitrateKbps*1000,
+	)
 	if err != nil {
 		s.qualityMu.Unlock()
 		s.qualityChangeMu.Unlock()
@@ -183,6 +192,10 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		done:                   make(chan struct{}),
 		ownedOpen:              true,
 	}
+	peer.congestionBitrate.Store(int64(estimator.GetTargetBitrate()))
+	estimator.OnTargetBitrateChange(func(bitrate int) {
+		s.updateCongestionBitrate(peer, bitrate)
+	})
 	if err := s.registerPeer(peer); err != nil {
 		s.qualityMu.Unlock()
 		s.qualityChangeMu.Unlock()
@@ -190,6 +203,9 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		_ = peerConnection.Close()
 		s.releaseReservation()
 		return nil, err
+	}
+	if err := s.applyCongestionBitrateLocked(); err != nil {
+		peerLogger.Debug("apply initial congestion bitrate", zap.Error(err))
 	}
 	s.qualityMu.Unlock()
 	s.qualityChangeMu.Unlock()
@@ -664,6 +680,10 @@ func (p *peer) logTraceSnapshot() {
 	if p.input != nil {
 		inputState = p.input.ReadyState().String()
 	}
+	inputMotionState := "absent"
+	if p.inputMotion != nil {
+		inputMotionState = p.inputMotion.ReadyState().String()
+	}
 	p.inputMu.Unlock()
 
 	fields := []zap.Field{
@@ -677,6 +697,7 @@ func (p *peer) logTraceSnapshot() {
 		zap.String("signaling_state", p.pc.SignalingState().String()),
 		zap.String("control_channel_state", controlState),
 		zap.String("input_channel_state", inputState),
+		zap.String("input_motion_channel_state", inputMotionState),
 		zap.Int("video_queue_length", p.videoSamples.len()),
 		zap.Uint64("video_samples_seen", p.videoSamplesSeen.Load()),
 		zap.Uint64("video_samples_enqueued", p.videoSamplesEnqueued.Load()),
@@ -685,7 +706,9 @@ func (p *peer) logTraceSnapshot() {
 		zap.Uint64("video_bytes_written", p.videoBytesWritten.Load()),
 		zap.Uint64("video_nack_reports", p.videoNACKReports.Load()),
 		zap.Uint64("video_nack_packets", p.videoNACKPackets.Load()),
-		zap.Int("video_bitrate_kbps", p.service.source.Quality().BitrateKbps),
+		zap.Int("video_requested_bitrate_kbps", p.service.source.Quality().BitrateKbps),
+		zap.Int64("video_encoder_bitrate_kbps", p.service.encoderBitrateKbps.Load()),
+		zap.Int64("video_congestion_bitrate_kbps", p.congestionBitrate.Load()/1000),
 		zap.Uint64("video_source_pts_regressions", p.videoPTSRegressions.Load()),
 		zap.Duration("video_produced_elapsed", time.Duration(p.videoProducedElapsed.Load())),
 		zap.Duration("video_rtp_elapsed", time.Duration(p.videoRTPElapsed.Load())),

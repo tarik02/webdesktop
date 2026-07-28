@@ -20,6 +20,8 @@ func (p *peer) onDataChannel(channel *pion.DataChannel) {
 		p.setControlChannel(channel)
 	case "input":
 		p.setInputChannel(channel)
+	case "input-motion":
+		p.setInputMotionChannel(channel)
 	case "clipboard":
 		if p.service.clipboard.Enabled() {
 			p.setClipboardChannel(channel)
@@ -114,7 +116,51 @@ func (p *peer) setInputChannel(channel *pion.DataChannel) {
 	channel.OnClose(func() { cleanup() })
 	channel.OnError(func(err error) { p.logger.Debug("input data channel error", zap.Error(err)); cleanup() })
 	channel.OnMessage(func(message pion.DataChannelMessage) {
-		p.handleInputMessage(channel, message)
+		p.handleInputMessage(channel, message, false)
+	})
+}
+
+func (p *peer) setInputMotionChannel(channel *pion.DataChannel) {
+	maxRetransmits := channel.MaxRetransmits()
+	if channel.Ordered() || channel.MaxPacketLifeTime() != nil || maxRetransmits == nil || *maxRetransmits != 0 {
+		p.logger.Info("rejecting input motion data channel without unordered zero-retransmit delivery")
+		_ = channel.Close()
+		return
+	}
+
+	p.inputMu.Lock()
+	previous := p.inputMotion
+	p.inputMotionGeneration++
+	channelGeneration := p.inputMotionGeneration
+	p.inputMotion = channel
+	p.inputMotionSequence = 0
+	p.inputMotionSequenceSet = false
+	p.inputLeaseGeneration++
+	p.inputMu.Unlock()
+	if previous != nil {
+		_ = p.service.input.Release(p.id)
+		_ = previous.Close()
+	}
+
+	channel.OnOpen(func() {
+		p.logger.Info("input motion data channel opened")
+	})
+	cleanup := func() {
+		p.inputMu.Lock()
+		owned := p.inputMotion == channel && p.inputMotionGeneration == channelGeneration
+		if owned {
+			p.inputMotion = nil
+			p.inputLeaseGeneration++
+		}
+		p.inputMu.Unlock()
+		if owned {
+			_ = p.service.input.Release(p.id)
+		}
+	}
+	channel.OnClose(func() { cleanup() })
+	channel.OnError(func(err error) { p.logger.Debug("input motion data channel error", zap.Error(err)); cleanup() })
+	channel.OnMessage(func(message pion.DataChannelMessage) {
+		p.handleInputMessage(channel, message, true)
 	})
 }
 
@@ -162,28 +208,35 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		}
 		p.inputMu.Lock()
 		inputChannel := p.input
+		inputMotionChannel := p.inputMotion
 		p.inputMu.Unlock()
-		if inputChannel == nil || inputChannel.ReadyState() != pion.DataChannelStateOpen {
-			p.writeControlError(channel, request.ID.Value, "input_channel_required", "an open reliable ordered input data channel is required")
+		if inputChannel == nil || inputChannel.ReadyState() != pion.DataChannelStateOpen ||
+			inputMotionChannel == nil || inputMotionChannel.ReadyState() != pion.DataChannelStateOpen {
+			p.writeControlError(channel, request.ID.Value, "input_channel_required", "open reliable input and unreliable input-motion data channels are required")
 			return
 		}
 		p.inputMu.Lock()
 		inputGeneration := p.inputChannelGeneration
+		inputMotionGeneration := p.inputMotionGeneration
 		leaseGeneration := p.inputLeaseGeneration + 1
 		p.inputLeaseGeneration = leaseGeneration
-		inputStillCurrent := p.input == inputChannel
+		inputStillCurrent := p.input == inputChannel && p.inputMotion == inputMotionChannel
 		p.inputMu.Unlock()
 		if !inputStillCurrent || p.isClosing() {
 			return
 		}
 		capabilities, err := p.service.input.Acquire(p.id, func(sequence uint64, cause error) {
-			p.onInputRevoked(inputGeneration, leaseGeneration, sequence, cause)
+			p.onInputRevoked(inputGeneration, inputMotionGeneration, leaseGeneration, sequence, cause)
 		})
 		p.controlMu.Lock()
 		controlStillCurrent := p.control == channel
 		p.controlMu.Unlock()
 		p.inputMu.Lock()
-		inputStillCurrent = p.input == inputChannel && p.inputChannelGeneration == inputGeneration && p.inputLeaseGeneration == leaseGeneration
+		inputStillCurrent = p.input == inputChannel &&
+			p.inputMotion == inputMotionChannel &&
+			p.inputChannelGeneration == inputGeneration &&
+			p.inputMotionGeneration == inputMotionGeneration &&
+			p.inputLeaseGeneration == leaseGeneration
 		p.inputMu.Unlock()
 		if err == nil && (!controlStillCurrent || !inputStillCurrent || p.isClosing()) {
 			p.inputMu.Lock()
@@ -294,6 +347,10 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		quality.BitrateKbps = request.Quality.Value.BitrateKbps.Value
 	}
 	err = p.service.source.UpdateQuality(quality)
+	if err == nil {
+		p.service.encoderBitrateKbps.Store(int64(quality.BitrateKbps))
+		err = p.service.applyCongestionBitrateLocked()
+	}
 	effective := p.service.source.Quality()
 	_, currentExists := p.service.source.Profile(qualityCurrent.Profile)
 	effectiveProfile, effectiveExists := p.service.source.Profile(effective.Profile)
@@ -342,9 +399,12 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	}
 }
 
-func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataChannelMessage) {
+func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataChannelMessage, motion bool) {
 	p.inputMu.Lock()
 	current := p.input == channel
+	if motion {
+		current = p.inputMotion == channel
+	}
 	p.inputMu.Unlock()
 	if !current || p.isClosing() {
 		return
@@ -374,20 +434,42 @@ func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataCh
 		p.writeInputError(channel, sequence, protocolErr.Code, protocolErr.Message)
 		return
 	}
+	if motion && event.Type != InputEventPointerAbsolute && event.Type != InputEventPointerRelative {
+		p.writeInputError(channel, sequence, "unsupported_type", "input-motion accepts pointer motion messages only")
+		return
+	}
 
 	p.inputMu.Lock()
 	inputGeneration := p.inputChannelGeneration
-	if p.input != channel || p.isClosing() {
+	inputSequence := p.inputSequence
+	inputSequenceSet := p.inputSequenceSet
+	if motion {
+		inputGeneration = p.inputMotionGeneration
+		inputSequence = p.inputMotionSequence
+		inputSequenceSet = p.inputMotionSequenceSet
+	}
+	current = p.input == channel
+	if motion {
+		current = p.inputMotion == channel
+	}
+	if !current || p.isClosing() {
 		p.inputMu.Unlock()
 		return
 	}
-	if p.inputSequenceSet && request.Sequence.Value <= p.inputSequence {
+	if inputSequenceSet && request.Sequence.Value <= inputSequence {
 		p.inputMu.Unlock()
-		p.writeInputError(channel, sequence, "invalid_sequence", "sequence must increase monotonically")
+		if !motion {
+			p.writeInputError(channel, sequence, "invalid_sequence", "sequence must increase monotonically")
+		}
 		return
 	}
-	p.inputSequence = request.Sequence.Value
-	p.inputSequenceSet = true
+	if motion {
+		p.inputMotionSequence = request.Sequence.Value
+		p.inputMotionSequenceSet = true
+	} else {
+		p.inputSequence = request.Sequence.Value
+		p.inputSequenceSet = true
+	}
 	p.inputMu.Unlock()
 
 	if !p.connected.Load() {
@@ -398,7 +480,11 @@ func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataCh
 		return
 	}
 	p.inputMu.Lock()
-	currentInput := p.input == channel && p.inputChannelGeneration == inputGeneration && !p.isClosing()
+	currentInput := p.input == channel && p.inputChannelGeneration == inputGeneration
+	if motion {
+		currentInput = p.inputMotion == channel && p.inputMotionGeneration == inputGeneration
+	}
+	currentInput = currentInput && !p.isClosing()
 	p.inputMu.Unlock()
 	if !currentInput {
 		return
@@ -455,13 +541,20 @@ func (p *peer) writeControl(channel *pion.DataChannel, response controlResponse)
 	return true
 }
 
-func (p *peer) onInputRevoked(inputGeneration, leaseGeneration, sequence uint64, cause error) {
+func (p *peer) onInputRevoked(inputGeneration, inputMotionGeneration, leaseGeneration, sequence uint64, cause error) {
 	p.inputMu.Lock()
 	channel := p.input
-	current := channel != nil && p.inputChannelGeneration == inputGeneration && p.inputLeaseGeneration == leaseGeneration
+	motionChannel := p.inputMotion
+	current := channel != nil &&
+		motionChannel != nil &&
+		p.inputChannelGeneration == inputGeneration &&
+		p.inputMotionGeneration == inputMotionGeneration &&
+		p.inputLeaseGeneration == leaseGeneration
 	if current && !p.isClosing() {
 		p.input = nil
+		p.inputMotion = nil
 		p.inputChannelGeneration++
+		p.inputMotionGeneration++
 		p.inputLeaseGeneration++
 	}
 	p.inputMu.Unlock()
@@ -474,6 +567,7 @@ func (p *peer) onInputRevoked(inputGeneration, leaseGeneration, sequence uint64,
 	}
 	p.writeInputError(channel, correlation, inputErrorCode(cause), cause.Error())
 	_ = channel.Close()
+	_ = motionChannel.Close()
 }
 
 func (p *peer) writeInputError(channel *pion.DataChannel, sequence *uint64, code, message string) {
