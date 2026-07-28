@@ -252,6 +252,7 @@ type controlQuality struct {
 type controlInput struct {
 	Pointer  bool `json:"pointer"`
 	Keyboard bool `json:"keyboard"`
+	Text     bool `json:"text"`
 }
 
 type controlResponse struct {

@@ -617,6 +617,7 @@ export class DesktopConnection {
     this.trace("info", "input.acquire.complete", {
       pointer: String(response.input.pointer),
       keyboard: String(response.input.keyboard),
+      text: String(response.input.text),
     });
     return response.input;
   }

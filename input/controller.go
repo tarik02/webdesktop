@@ -39,6 +39,7 @@ type Authorization struct {
 type Capabilities struct {
 	Pointer  bool
 	Keyboard bool
+	Text     bool
 }
 
 // EventType identifies one input event.
@@ -76,6 +77,7 @@ type SenderStatus struct {
 	Connected bool
 	Pointer   bool
 	Keyboard  bool
+	Text      bool
 	Reset     uint64
 	Err       error
 }
@@ -210,7 +212,11 @@ func (c *Controller) Acquire(owner uint64, revoke func(uint64, error)) (Capabili
 	}
 	if state, ok := c.owners[owner]; ok {
 		state.revoke = revoke
-		return Capabilities{Pointer: c.cfg.Pointer, Keyboard: c.cfg.Keyboard}, nil
+		return Capabilities{
+			Pointer:  c.cfg.Pointer,
+			Keyboard: c.cfg.Keyboard,
+			Text:     c.sender.Status().Text,
+		}, nil
 	}
 	if c.cfg.Locking && len(c.owners) != 0 {
 		return Capabilities{}, ErrBusy
@@ -238,7 +244,11 @@ func (c *Controller) Acquire(owner uint64, revoke func(uint64, error)) (Capabili
 		pressedKeys:    make(map[uint32]struct{}),
 		pressedButtons: make(map[uint32]struct{}),
 	}
-	return Capabilities{Pointer: c.cfg.Pointer, Keyboard: c.cfg.Keyboard}, nil
+	return Capabilities{
+		Pointer:  c.cfg.Pointer,
+		Keyboard: c.cfg.Keyboard,
+		Text:     status.Text,
+	}, nil
 }
 
 // Owns reports whether owner has active input access.
