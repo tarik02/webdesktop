@@ -458,7 +458,9 @@ func (p *peer) handleInputMessage(channel *pion.DataChannel, message pion.DataCh
 	}
 	if inputSequenceSet && request.Sequence.Value <= inputSequence {
 		p.inputMu.Unlock()
-		p.writeInputError(channel, sequence, "invalid_sequence", "sequence must increase monotonically")
+		if !motion {
+			p.writeInputError(channel, sequence, "invalid_sequence", "sequence must increase monotonically")
+		}
 		return
 	}
 	if motion {
