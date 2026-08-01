@@ -59,6 +59,7 @@ type peer struct {
 	connected          atomic.Bool
 	videoNeedsKeyframe atomic.Bool
 	congestionBitrate  atomic.Int64
+	targetGeneration   atomic.Uint64
 
 	signalWriteMu    sync.Mutex
 	controlWriteMu   sync.Mutex
@@ -258,7 +259,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 					return
 				}
 				peer.keyframeRequests.Add(1)
-				s.requestKeyframe("peer-connected")
+				s.requestKeyframe(peer.id, "peer-connected")
 			})
 		case pion.PeerConnectionStateFailed, pion.PeerConnectionStateClosed:
 			peer.closeWith(websocket.CloseGoingAway, "peer connection closed")

@@ -65,6 +65,12 @@ func (m *videoMailbox) len() int {
 	return 1
 }
 
+func (m *videoMailbox) clear() {
+	m.mu.Lock()
+	m.pending = nil
+	m.mu.Unlock()
+}
+
 const audioMailboxCapacity = 4
 
 type audioMailbox struct {
@@ -144,10 +150,10 @@ func (p *peer) readRTCP(sender *pion.RTPSender, video bool) {
 			switch typed := packet.(type) {
 			case *rtcp.PictureLossIndication:
 				p.keyframeRequests.Add(1)
-				p.service.requestKeyframe("pli")
+				p.service.requestKeyframe(p.id, "pli")
 			case *rtcp.FullIntraRequest:
 				p.keyframeRequests.Add(1)
-				p.service.requestKeyframe("fir")
+				p.service.requestKeyframe(p.id, "fir")
 			case *rtcp.TransportLayerNack:
 				p.videoNACKReports.Add(1)
 				var packets uint64
@@ -168,14 +174,14 @@ func (p *peer) readRTCP(sender *pion.RTPSender, video bool) {
 	}
 }
 
-func (p *peer) enqueueVideo(sample VideoSample) {
+func (p *peer) enqueueVideo(sample VideoSample) bool {
 	if p.isClosing() || !p.connected.Load() || p.ctx.Err() != nil {
-		return
+		return false
 	}
 	p.videoSamplesSeen.Add(1)
 	if p.videoNeedsKeyframe.Load() && !sample.KeyFrame {
 		p.videoSamplesDropped.Add(1)
-		return
+		return false
 	}
 	result := p.videoSamples.put(sample)
 	if result.accepted {
@@ -189,6 +195,7 @@ func (p *peer) enqueueVideo(sample VideoSample) {
 	} else {
 		p.videoSamplesDropped.Add(1)
 	}
+	return result.accepted
 }
 
 func (p *peer) enqueueAudio(sample AudioSample) {

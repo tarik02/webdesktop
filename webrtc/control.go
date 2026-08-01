@@ -195,6 +195,48 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	}
 
 	switch request.Type.Value {
+	case controlTypeTargetSelect:
+		targeted, ok := p.service.source.(TargetMediaSource)
+		if !ok {
+			p.writeControlError(channel, request.ID.Value, "target_selection_disabled", "media source does not support target selection")
+			return
+		}
+		if !p.connected.Load() {
+			p.writeControlError(channel, request.ID.Value, "peer_not_connected", "WebRTC peer is not connected")
+			return
+		}
+		requestID := request.ID.Value
+		targetID := request.TargetID.Value
+		generation := p.targetGeneration.Add(1)
+		p.inputMu.Lock()
+		p.inputLeaseGeneration++
+		p.inputMu.Unlock()
+		_ = p.service.input.Release(p.id)
+		p.videoNeedsKeyframe.Store(true)
+		p.videoSamples.clear()
+		p.goOwned(func() {
+			selection, err := targeted.SelectTarget(p.ctx, p.id, generation, targetID)
+			p.controlMu.Lock()
+			currentControl := p.control == channel
+			p.controlMu.Unlock()
+			if !currentControl || p.isClosing() {
+				return
+			}
+			if err != nil {
+				p.writeControlError(channel, requestID, "target_unavailable", err.Error())
+				return
+			}
+			if !p.writeControl(channel, controlResponse{
+				Version: controlVersion,
+				ID:      requestID,
+				Type:    controlTypeTargetSelectResult,
+				OK:      true,
+				Target:  &selection,
+			}) {
+				p.Close()
+			}
+		})
+		return
 	case controlTypeInputAcquire:
 		p.controlMu.Lock()
 		currentControl := p.control == channel
