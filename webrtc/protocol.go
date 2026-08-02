@@ -18,7 +18,7 @@ import (
 
 const (
 	signalingVersion = 1
-	controlVersion   = 3
+	controlVersion   = 4
 	inputVersion     = 1
 
 	signalTypeOffer        = "offer"
@@ -33,6 +33,10 @@ const (
 	controlTypeInputAcquireResult = "input.acquire.result"
 	controlTypeInputRelease       = "input.release"
 	controlTypeInputReleaseResult = "input.release.result"
+	controlTypeTargetSelect       = "target.select"
+	controlTypeTargetSelectResult = "target.select.result"
+	controlTypeTargetUpdated      = "target.updated"
+	controlTypeTargetUnavailable  = "target.unavailable"
 	controlTypeError              = "error"
 
 	inputTypePointerAbsolute = "input.pointer.motion.absolute"
@@ -234,10 +238,11 @@ func (value *optionalQuality) UnmarshalJSON(data []byte) error {
 }
 
 type controlRequest struct {
-	Version optionalInt     `json:"version"`
-	ID      optionalString  `json:"id"`
-	Type    optionalString  `json:"type"`
-	Quality optionalQuality `json:"quality"`
+	Version  optionalInt     `json:"version"`
+	ID       optionalString  `json:"id"`
+	Type     optionalString  `json:"type"`
+	Quality  optionalQuality `json:"quality"`
+	TargetID optionalString  `json:"target_id"`
 }
 
 type controlQuality struct {
@@ -256,13 +261,15 @@ type controlInput struct {
 }
 
 type controlResponse struct {
-	Version int             `json:"version"`
-	ID      string          `json:"id"`
-	Type    string          `json:"type"`
-	OK      bool            `json:"ok"`
-	Quality *controlQuality `json:"quality,omitempty"`
-	Input   *controlInput   `json:"input,omitempty"`
-	Error   *protocolError  `json:"error,omitempty"`
+	Version  int              `json:"version"`
+	ID       string           `json:"id,omitempty"`
+	Type     string           `json:"type"`
+	OK       bool             `json:"ok"`
+	Quality  *controlQuality  `json:"quality,omitempty"`
+	Input    *controlInput    `json:"input,omitempty"`
+	Target   *TargetSelection `json:"target,omitempty"`
+	TargetID string           `json:"target_id,omitempty"`
+	Error    *protocolError   `json:"error,omitempty"`
 }
 
 type inputRequest struct {
@@ -447,11 +454,22 @@ func validateControlRequest(request controlRequest) *protocolError {
 	}
 	switch request.Type.Value {
 	case controlTypeInputAcquire, controlTypeInputRelease:
-		if request.Quality.Set {
+		if request.Quality.Set || request.TargetID.Set {
 			return &protocolError{
 				Code:    "unexpected_field",
-				Message: "quality is not allowed for input lease requests",
+				Message: "input lease requests do not allow quality or target_id",
 			}
+		}
+		return nil
+	case controlTypeTargetSelect:
+		if request.Quality.Set {
+			return &protocolError{Code: "unexpected_field", Message: "quality is not allowed for target selection"}
+		}
+		if !request.TargetID.Set {
+			return &protocolError{Code: "missing_field", Message: "target_id is required"}
+		}
+		if request.TargetID.Value == "" || len(request.TargetID.Value) > 256 {
+			return &protocolError{Code: "invalid_target", Message: "target_id must contain between 1 and 256 bytes"}
 		}
 		return nil
 	case controlTypeQualitySet:
@@ -460,6 +478,9 @@ func validateControlRequest(request controlRequest) *protocolError {
 			Code:    "unsupported_type",
 			Message: fmt.Sprintf("control message type %q is not supported", request.Type.Value),
 		}
+	}
+	if request.TargetID.Set {
+		return &protocolError{Code: "unexpected_field", Message: "target_id is not allowed for quality updates"}
 	}
 	if !request.Quality.Set {
 		return &protocolError{

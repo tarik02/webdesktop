@@ -592,7 +592,7 @@ export class DesktopConnection {
     let response: ControlResponse;
     try {
       response = await this.requestControl({
-        version: 3,
+        version: 4,
         id: this.requestID("input"),
         type: "input.acquire",
       });
@@ -647,7 +647,7 @@ export class DesktopConnection {
       return;
     }
     const response = await this.requestControl({
-      version: 3,
+      version: 4,
       id: this.requestID("input"),
       type: "input.release",
     });
@@ -669,7 +669,7 @@ export class DesktopConnection {
     let response: ControlResponse;
     try {
       response = await this.requestControl({
-        version: 3,
+        version: 4,
         id: this.requestID("quality"),
         type: "video.quality.set",
         quality,
@@ -1193,7 +1193,7 @@ export class DesktopConnection {
   }
 
   private requestControl(message: {
-    version: 3;
+    version: 4;
     id: string;
     type: "input.acquire" | "input.release" | "video.quality.set";
     quality?: QualityPatch;

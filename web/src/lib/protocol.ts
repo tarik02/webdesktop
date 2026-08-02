@@ -203,7 +203,7 @@ export const signalResponseSchema = z.discriminatedUnion("type", [
 export const controlResponseSchema = z.discriminatedUnion("type", [
   z
     .object({
-      version: z.literal(3),
+      version: z.literal(4),
       id: z.string(),
       type: z.literal("video.quality.set.result"),
       ok: z.literal(true),
@@ -212,7 +212,7 @@ export const controlResponseSchema = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({
-      version: z.literal(3),
+      version: z.literal(4),
       id: z.string(),
       type: z.literal("input.acquire.result"),
       ok: z.literal(true),
@@ -227,7 +227,7 @@ export const controlResponseSchema = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({
-      version: z.literal(3),
+      version: z.literal(4),
       id: z.string(),
       type: z.literal("input.release.result"),
       ok: z.literal(true),
@@ -235,7 +235,7 @@ export const controlResponseSchema = z.discriminatedUnion("type", [
     .strict(),
   z
     .object({
-      version: z.literal(3),
+      version: z.literal(4),
       id: z.string(),
       type: z.literal("error"),
       ok: z.literal(false),

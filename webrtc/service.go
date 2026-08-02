@@ -129,7 +129,12 @@ type Service struct {
 	qualityChangeMu    sync.Mutex
 	qualityGeneration  uint64
 	encoderBitrateKbps atomic.Int64
-	keyframeRequests   chan string
+	keyframeRequests   chan keyframeRequest
+}
+
+type keyframeRequest struct {
+	peerID uint64
+	reason string
 }
 
 // New constructs a reusable WebRTC service without opening listeners.
@@ -189,7 +194,7 @@ func New(
 		cancel:           cancel,
 		peers:            make(map[*peer]struct{}),
 		closeDone:        make(chan struct{}),
-		keyframeRequests: make(chan string, 1),
+		keyframeRequests: make(chan keyframeRequest, 1),
 	}
 	service.encoderBitrateKbps.Store(int64(quality.BitrateKbps))
 	return service, nil
@@ -264,6 +269,10 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.cfg.AudioEnabled {
 		audioSamples = s.audio.Samples()
 	}
+	var targetEvents <-chan TargetEvent
+	if source, ok := s.source.(TargetEventSource); ok {
+		targetEvents = source.TargetEvents()
+	}
 
 	for {
 		select {
@@ -271,12 +280,70 @@ func (s *Service) Run(ctx context.Context) error {
 			return nil
 		case <-s.ctx.Done():
 			return nil
-		case reason := <-s.keyframeRequests:
-			if err := s.source.RequestKeyframe(); err != nil {
+		case request := <-s.keyframeRequests:
+			var err error
+			if targeted, ok := s.source.(TargetMediaSource); ok && request.peerID != 0 {
+				err = targeted.RequestTargetKeyframe(request.peerID)
+			} else {
+				err = s.source.RequestKeyframe()
+			}
+			if err != nil {
 				s.logger.Debug("keyframe request was not applied",
-					zap.String("reason", reason),
+					zap.String("reason", request.reason),
 					zap.Error(err),
 				)
+			}
+		case event, ok := <-targetEvents:
+			if !ok {
+				targetEvents = nil
+				continue
+			}
+			var targetPeer *peer
+			for _, candidate := range s.peerSnapshot() {
+				if candidate.id == event.PeerID {
+					targetPeer = candidate
+					break
+				}
+			}
+			if targetPeer == nil || targetPeer.isClosing() {
+				continue
+			}
+			targetPeer.inputMu.Lock()
+			targetPeer.inputLeaseGeneration++
+			targetPeer.inputMu.Unlock()
+			_ = s.input.Release(targetPeer.id)
+			targetPeer.controlMu.Lock()
+			control := targetPeer.control
+			targetPeer.controlMu.Unlock()
+			if control == nil {
+				continue
+			}
+			switch event.Kind {
+			case TargetEventUpdated:
+				selection := event.Target
+				if !targetPeer.writeControl(control, controlResponse{
+					Version: controlVersion,
+					Type:    controlTypeTargetUpdated,
+					OK:      true,
+					Target:  &selection,
+				}) {
+					targetPeer.Close()
+				}
+			case TargetEventUnavailable:
+				targetPeer.videoNeedsKeyframe.Store(true)
+				targetPeer.videoSamples.clear()
+				if !targetPeer.writeControl(control, controlResponse{
+					Version:  controlVersion,
+					Type:     controlTypeTargetUnavailable,
+					OK:       false,
+					TargetID: event.TargetID,
+					Error: &protocolError{
+						Code:    "target_unavailable",
+						Message: event.Reason,
+					},
+				}) {
+					targetPeer.Close()
+				}
 			}
 		case sample, ok := <-s.source.Samples():
 			if !ok {
@@ -289,9 +356,15 @@ func (s *Service) Run(ctx context.Context) error {
 				s.logger.Warn("dropping media sample without a production timestamp")
 				continue
 			}
+			targeted, targetAware := s.source.(TargetMediaSource)
 			for _, peer := range s.peerSnapshot() {
+				if targetAware && !targeted.AcceptsTarget(peer.id, sample.TargetID) {
+					continue
+				}
 				if peer.videoCodec.ID == sample.Codec {
-					peer.enqueueVideo(sample)
+					if peer.enqueueVideo(sample) && targetAware && sample.KeyFrame {
+						targeted.ConfirmTargetFrame(peer.id, sample.TargetID)
+					}
 				}
 			}
 		case sample, ok := <-audioSamples:
@@ -554,6 +627,11 @@ func (s *Service) removePeer(peer *peer) {
 	}
 	s.peersMu.Unlock()
 	if removed {
+		if targeted, ok := s.source.(TargetMediaSource); ok {
+			targeted.ReleaseTarget(peer.id)
+		}
+	}
+	if removed {
 		s.qualityChangeMu.Lock()
 		if err := s.applyCongestionBitrateLocked(); err != nil {
 			s.logger.Debug("restore encoder bitrate after peer closed", zap.Error(err))
@@ -606,9 +684,9 @@ func (s *Service) closePeerForProfileChange(peer *peer, generation uint64) {
 	}
 }
 
-func (s *Service) requestKeyframe(reason string) {
+func (s *Service) requestKeyframe(peerID uint64, reason string) {
 	select {
-	case s.keyframeRequests <- reason:
+	case s.keyframeRequests <- keyframeRequest{peerID: peerID, reason: reason}:
 	default:
 	}
 }

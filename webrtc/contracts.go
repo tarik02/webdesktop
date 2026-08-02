@@ -124,11 +124,40 @@ func (codec RTPCodec) Compatible(other RTPCodec) bool {
 type VideoSample struct {
 	Data       []byte
 	Codec      string
+	TargetID   string
 	ProducedAt time.Time
 	PTS        time.Duration
 	PTSValid   bool
 	Duration   time.Duration
 	KeyFrame   bool
+}
+
+// TargetSelection describes the source selected for one peer.
+type TargetSelection struct {
+	TargetID          string  `json:"target_id"`
+	Generation        uint64  `json:"generation"`
+	Width             int     `json:"width"`
+	Height            int     `json:"height"`
+	PhysicalWidth     int     `json:"physical_width"`
+	PhysicalHeight    int     `json:"physical_height"`
+	DeviceScaleFactor float64 `json:"device_scale_factor"`
+}
+
+// TargetEventKind identifies a selected target lifecycle change.
+type TargetEventKind string
+
+const (
+	TargetEventUpdated     TargetEventKind = "updated"
+	TargetEventUnavailable TargetEventKind = "unavailable"
+)
+
+// TargetEvent reports a change for one peer's selected target.
+type TargetEvent struct {
+	Kind     TargetEventKind
+	PeerID   uint64
+	Target   TargetSelection
+	TargetID string
+	Reason   string
 }
 
 // AudioSample is one encoded Opus frame ready for transport.
@@ -147,6 +176,21 @@ type MediaSource interface {
 	SetBitrate(int) error
 	RequestKeyframe() error
 	SetActive(bool)
+}
+
+// TargetMediaSource routes tagged samples and keyframe requests per peer.
+// SelectTarget returns after the source has accepted a frame for the new target.
+type TargetMediaSource interface {
+	SelectTarget(context.Context, uint64, uint64, string) (TargetSelection, error)
+	ReleaseTarget(uint64)
+	AcceptsTarget(uint64, string) bool
+	ConfirmTargetFrame(uint64, string)
+	RequestTargetKeyframe(uint64) error
+}
+
+// TargetEventSource reports selected target replacement and loss events.
+type TargetEventSource interface {
+	TargetEvents() <-chan TargetEvent
 }
 
 // AudioSource supplies optional encoded Opus audio.
