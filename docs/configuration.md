@@ -161,6 +161,7 @@ the input lock. Transfers are limited to 32 MiB.
 | `webrtc.ice_servers` | `[]` | STUN or TURN URLs |
 | `webrtc.ice_username` | empty | Required with TURN |
 | `webrtc.ice_credential` | empty | Required with TURN |
+| `webrtc.ice_advertised_ips` | `[]` | Public IPs mapped to the host by static DNAT |
 | `webrtc.udp_port_min` | `0` | Zero uses the system range |
 | `webrtc.udp_port_max` | `0` | Must be set with the minimum |
 | `webrtc.allowed_origins` | `[]` | Empty means same-host browser requests |

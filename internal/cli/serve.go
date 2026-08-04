@@ -68,6 +68,7 @@ func newServeCommand() *cobra.Command {
 	flags.StringSlice("webrtc-ice-server", defaults.WebRTC.ICEServers, "ICE server URL; may be repeated")
 	flags.String("webrtc-ice-username", defaults.WebRTC.ICEUsername, "ICE server username")
 	flags.String("webrtc-ice-credential", defaults.WebRTC.ICECredential, "ICE server credential")
+	flags.StringSlice("webrtc-ice-advertised-ip", defaults.WebRTC.ICEAdvertisedIPs, "public ICE IP; may be repeated")
 	flags.Int("webrtc-udp-port-min", defaults.WebRTC.UDPPortMin, "minimum ICE UDP port, or zero for the system range")
 	flags.Int("webrtc-udp-port-max", defaults.WebRTC.UDPPortMax, "maximum ICE UDP port, or zero for the system range")
 	flags.StringSlice("webrtc-allowed-origin", defaults.WebRTC.AllowedOrigins, "allowed WebSocket origin; may be repeated")
@@ -109,6 +110,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	v.SetDefault("webrtc.ice_servers", defaults.WebRTC.ICEServers)
 	v.SetDefault("webrtc.ice_username", defaults.WebRTC.ICEUsername)
 	v.SetDefault("webrtc.ice_credential", defaults.WebRTC.ICECredential)
+	v.SetDefault("webrtc.ice_advertised_ips", defaults.WebRTC.ICEAdvertisedIPs)
 	v.SetDefault("webrtc.udp_port_min", defaults.WebRTC.UDPPortMin)
 	v.SetDefault("webrtc.udp_port_max", defaults.WebRTC.UDPPortMax)
 	v.SetDefault("webrtc.allowed_origins", defaults.WebRTC.AllowedOrigins)
@@ -140,6 +142,7 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 		"webrtc.ice_servers",
 		"webrtc.ice_username",
 		"webrtc.ice_credential",
+		"webrtc.ice_advertised_ips",
 		"webrtc.udp_port_min",
 		"webrtc.udp_port_max",
 		"webrtc.allowed_origins",
@@ -150,35 +153,36 @@ func loadConfig(cmd *cobra.Command, configFile string) (config.Config, error) {
 	}
 
 	flagBindings := map[string]string{
-		"listen-address":          "server.listen_address",
-		"shutdown-timeout":        "server.shutdown_timeout",
-		"log-level":               "logging.level",
-		"log-format":              "logging.format",
-		"tracing-enabled":         "tracing.enabled",
-		"video-source":            "video.source",
-		"video-cursor-mode":       "video.cursor_mode",
-		"video-profile":           "video.profile",
-		"video-option":            "video.option",
-		"video-encoder-threads":   "video.tuning.threads",
-		"video-keyframe-interval": "video.tuning.keyframe_interval",
-		"video-vp8-cpu-used":      "video.tuning.vp8_cpu_used",
-		"audio-enabled":           "audio.enabled",
-		"audio-device":            "audio.device",
-		"audio-bitrate-kbps":      "audio.bitrate_kbps",
-		"input-enabled":           "input.enabled",
-		"input-locking":           "input.locking",
-		"input-pointer":           "input.pointer",
-		"input-keyboard":          "input.keyboard",
-		"input-queue-size":        "input.queue_size",
-		"clipboard-enabled":       "clipboard.enabled",
-		"webrtc-signaling-path":   "webrtc.signaling_path",
-		"webrtc-max-peers":        "webrtc.max_peers",
-		"webrtc-ice-server":       "webrtc.ice_servers",
-		"webrtc-ice-username":     "webrtc.ice_username",
-		"webrtc-ice-credential":   "webrtc.ice_credential",
-		"webrtc-udp-port-min":     "webrtc.udp_port_min",
-		"webrtc-udp-port-max":     "webrtc.udp_port_max",
-		"webrtc-allowed-origin":   "webrtc.allowed_origins",
+		"listen-address":           "server.listen_address",
+		"shutdown-timeout":         "server.shutdown_timeout",
+		"log-level":                "logging.level",
+		"log-format":               "logging.format",
+		"tracing-enabled":          "tracing.enabled",
+		"video-source":             "video.source",
+		"video-cursor-mode":        "video.cursor_mode",
+		"video-profile":            "video.profile",
+		"video-option":             "video.option",
+		"video-encoder-threads":    "video.tuning.threads",
+		"video-keyframe-interval":  "video.tuning.keyframe_interval",
+		"video-vp8-cpu-used":       "video.tuning.vp8_cpu_used",
+		"audio-enabled":            "audio.enabled",
+		"audio-device":             "audio.device",
+		"audio-bitrate-kbps":       "audio.bitrate_kbps",
+		"input-enabled":            "input.enabled",
+		"input-locking":            "input.locking",
+		"input-pointer":            "input.pointer",
+		"input-keyboard":           "input.keyboard",
+		"input-queue-size":         "input.queue_size",
+		"clipboard-enabled":        "clipboard.enabled",
+		"webrtc-signaling-path":    "webrtc.signaling_path",
+		"webrtc-max-peers":         "webrtc.max_peers",
+		"webrtc-ice-server":        "webrtc.ice_servers",
+		"webrtc-ice-username":      "webrtc.ice_username",
+		"webrtc-ice-credential":    "webrtc.ice_credential",
+		"webrtc-ice-advertised-ip": "webrtc.ice_advertised_ips",
+		"webrtc-udp-port-min":      "webrtc.udp_port_min",
+		"webrtc-udp-port-max":      "webrtc.udp_port_max",
+		"webrtc-allowed-origin":    "webrtc.allowed_origins",
 	}
 	for flagName, key := range flagBindings {
 		if err := v.BindPFlag(key, cmd.Flags().Lookup(flagName)); err != nil {

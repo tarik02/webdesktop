@@ -117,6 +117,7 @@ func New(cfg config.Config) (*App, error) {
 		ICEServers:          cfg.WebRTC.ICEServers,
 		ICEUsername:         cfg.WebRTC.ICEUsername,
 		ICECredential:       cfg.WebRTC.ICECredential,
+		ICEAdvertisedIPs:    cfg.WebRTC.ICEAdvertisedIPs,
 		UDPPortMin:          uint16(cfg.WebRTC.UDPPortMin),
 		UDPPortMax:          uint16(cfg.WebRTC.UDPPortMax),
 		MaxPeers:            cfg.WebRTC.MaxPeers,

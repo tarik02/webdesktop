@@ -375,6 +375,7 @@ webrtc:
   ice_servers: []
   ice_username: ""
   ice_credential: ""
+  ice_advertised_ips: []
   udp_port_min: 0
   udp_port_max: 0
   allowed_origins: []
