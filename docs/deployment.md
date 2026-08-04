@@ -154,6 +154,8 @@ configured on both the host and the service:
 
 ```yaml
 webrtc:
+  ice_advertised_ips:
+    - 203.0.113.10
   udp_port_min: 60000
   udp_port_max: 61000
 ```
@@ -161,6 +163,7 @@ webrtc:
 When both values are zero, Pion uses the system ephemeral range.
 
 Host ICE candidates usually work on the same machine or a reachable LAN.
+Set `ice_advertised_ips` when static DNAT maps the configured UDP range to the host.
 Configure STUN or TURN for NAT traversal. TURN URLs require
 `webrtc.ice_username` and `webrtc.ice_credential`.
 

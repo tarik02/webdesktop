@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,7 @@ type Config struct {
 	ICEServers          []string
 	ICEUsername         string
 	ICECredential       string
+	ICEAdvertisedIPs    []string
 	UDPPortMin          uint16
 	UDPPortMax          uint16
 	Subprotocols        []string
@@ -76,6 +78,11 @@ func (cfg Config) Validate() error {
 			if cfg.ICEUsername == "" {
 				errs = append(errs, fmt.Errorf("TURN server %q requires ICE credentials", server))
 			}
+		}
+	}
+	for _, address := range cfg.ICEAdvertisedIPs {
+		if _, err := netip.ParseAddr(address); err != nil {
+			errs = append(errs, fmt.Errorf("invalid advertised ICE IP %q: %w", address, err))
 		}
 	}
 	if (cfg.UDPPortMin == 0) != (cfg.UDPPortMax == 0) || cfg.UDPPortMax < cfg.UDPPortMin {
@@ -496,6 +503,15 @@ func (s *Service) newPeerConnection(
 	if s.cfg.UDPPortMin != 0 {
 		if err := settings.SetEphemeralUDPPortRange(s.cfg.UDPPortMin, s.cfg.UDPPortMax); err != nil {
 			return nil, nil, fmt.Errorf("set ICE UDP port range: %w", err)
+		}
+	}
+	if len(s.cfg.ICEAdvertisedIPs) > 0 {
+		if err := settings.SetICEAddressRewriteRules(pion.ICEAddressRewriteRule{
+			External:        append([]string(nil), s.cfg.ICEAdvertisedIPs...),
+			AsCandidateType: pion.ICECandidateTypeSrflx,
+			Mode:            pion.ICEAddressRewriteAppend,
+		}); err != nil {
+			return nil, nil, fmt.Errorf("set advertised ICE IPs: %w", err)
 		}
 	}
 

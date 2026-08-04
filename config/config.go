@@ -108,6 +108,7 @@ type WebRTC struct {
 	ICEServers          []string `mapstructure:"ice_servers" yaml:"ice_servers"`
 	ICEUsername         string   `mapstructure:"ice_username" yaml:"ice_username"`
 	ICECredential       string   `mapstructure:"ice_credential" yaml:"ice_credential"`
+	ICEAdvertisedIPs    []string `mapstructure:"ice_advertised_ips" yaml:"ice_advertised_ips"`
 	UDPPortMin          int      `mapstructure:"udp_port_min" yaml:"udp_port_min"`
 	UDPPortMax          int      `mapstructure:"udp_port_max" yaml:"udp_port_max"`
 	AllowedOrigins      []string `mapstructure:"allowed_origins" yaml:"allowed_origins"`
@@ -150,10 +151,11 @@ func Defaults() Config {
 		},
 		Clipboard: Clipboard{Enabled: true},
 		WebRTC: WebRTC{
-			SignalingPath:  "/webrtc",
-			MaxPeers:       2,
-			ICEServers:     []string{},
-			AllowedOrigins: []string{},
+			SignalingPath:    "/webrtc",
+			MaxPeers:         2,
+			ICEServers:       []string{},
+			ICEAdvertisedIPs: []string{},
+			AllowedOrigins:   []string{},
 		},
 	}
 }
@@ -530,6 +532,11 @@ func (cfg Config) Validate() error {
 			if cfg.WebRTC.ICEUsername == "" {
 				errs = append(errs, fmt.Errorf("webrtc.ice_servers TURN URL %q requires ICE credentials", server))
 			}
+		}
+	}
+	for _, address := range cfg.WebRTC.ICEAdvertisedIPs {
+		if net.ParseIP(address) == nil {
+			errs = append(errs, fmt.Errorf("webrtc.ice_advertised_ips contains invalid IP %q", address))
 		}
 	}
 	if (cfg.WebRTC.UDPPortMin == 0) != (cfg.WebRTC.UDPPortMax == 0) {
