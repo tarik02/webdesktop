@@ -106,10 +106,30 @@ systemctl --user enable --now \
   "$package/lib/systemd/user/webdesktop.service"
 ```
 
-The unit belongs to `graphical-session.target`. It stops with the graphical
-session and does not restart the shared portal. A denied portal request or
-invalid configuration leaves the unit failed instead of reopening the consent
+The unit belongs to `graphical-session.target` and follows KWin and both portal
+services across explicit restarts. It does not restart the shared portal or
+retry a failed Webdesktop process. A denied portal request or invalid
+configuration therefore remains visible instead of reopening the consent
 dialog in a loop.
+
+Plasma normally starts the KDE portal backend before the portal frontend. A
+custom or headless Plasma session must preserve that ordering. Add this drop-in
+when the session manager does not provide it:
+
+```ini
+# ~/.config/systemd/user/xdg-desktop-portal.service.d/kde.conf
+[Unit]
+Requires=plasma-xdg-desktop-portal-kde.service
+After=plasma-xdg-desktop-portal-kde.service
+PartOf=plasma-kwin_wayland.service plasma-xdg-desktop-portal-kde.service
+```
+
+Reload the units and restart KWin after adding the drop-in:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart plasma-kwin_wayland.service
+```
 
 Disable the service with:
 

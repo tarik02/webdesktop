@@ -220,7 +220,7 @@
                   export HOME=$TMPDIR
                   export XDG_RUNTIME_DIR=$TMPDIR
                   export SYSTEMD_UNIT_PATH=${webdesktop}/lib/systemd/user:${pkgs.systemd}/example/systemd/user
-                  systemd-analyze --user verify \
+                  systemd-analyze --user --recursive-errors=no verify \
                     ${webdesktop}/lib/systemd/user/webdesktop.service
                   mkdir -p $out
                   touch $out/passed
