@@ -144,6 +144,13 @@ type keyframeRequest struct {
 	reason string
 }
 
+type qualityUpdateResult struct {
+	effective               Quality
+	requesterNeedsReconnect bool
+	incompatiblePeers       []*peer
+	generation              uint64
+}
+
 // New constructs a reusable WebRTC service without opening listeners.
 func New(
 	cfg Config,
@@ -432,6 +439,59 @@ func (s *Service) PeerCount() int {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
 	return s.reservations
+}
+
+// UpdateQuality changes the shared encoder quality outside a peer control channel.
+func (s *Service) UpdateQuality(quality Quality) (Quality, error) {
+	s.qualityChangeMu.Lock()
+	result, err := s.updateQualityLocked(quality, nil)
+	s.qualityChangeMu.Unlock()
+	if err != nil {
+		return result.effective, err
+	}
+	for _, candidate := range result.incompatiblePeers {
+		s.closePeerForProfileChange(candidate, result.generation)
+	}
+	return result.effective, nil
+}
+
+func (s *Service) updateQualityLocked(quality Quality, requester *peer) (qualityUpdateResult, error) {
+	qualityCurrent := s.source.Quality()
+	err := s.source.UpdateQuality(quality)
+	if err == nil {
+		s.encoderBitrateKbps.Store(int64(quality.BitrateKbps))
+		err = s.applyCongestionBitrateLocked()
+	}
+	effective := s.source.Quality()
+	result := qualityUpdateResult{effective: effective}
+	_, currentExists := s.source.Profile(qualityCurrent.Profile)
+	effectiveProfile, effectiveExists := s.source.Profile(effective.Profile)
+	if err == nil && (!currentExists || !effectiveExists) {
+		err = errors.New("media profile metadata is unavailable after quality update")
+	}
+	if err != nil {
+		return result, err
+	}
+
+	for _, candidate := range s.peerSnapshot() {
+		incompatible := !candidate.videoCodec.Compatible(effectiveProfile.Codec) ||
+			candidate.videoFrontendTransform != effectiveProfile.FrontendTransform
+		if !incompatible {
+			continue
+		}
+		if candidate == requester {
+			result.requesterNeedsReconnect = true
+			continue
+		}
+		result.incompatiblePeers = append(result.incompatiblePeers, candidate)
+	}
+	if result.requesterNeedsReconnect || len(result.incompatiblePeers) > 0 {
+		s.qualityMu.Lock()
+		s.qualityGeneration++
+		result.generation = s.qualityGeneration
+		s.qualityMu.Unlock()
+	}
+	return result, nil
 }
 
 func videoCodecCapability(codec RTPCodec) pion.RTPCodecCapability {

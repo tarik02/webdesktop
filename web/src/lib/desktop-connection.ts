@@ -13,6 +13,7 @@ import {
   type Quality,
   type QualityPatch,
   type ServerConfig,
+  type VideoProfile,
 } from "#/lib/protocol.ts";
 
 const maxPointerBufferedAmount = 16 * 1024;
@@ -119,6 +120,29 @@ export class ProtocolError extends Error {
   ) {
     super(message);
   }
+}
+
+export function compatibleBrowserVideoCodecs(profile: VideoProfile): RTCRtpCodec[] | null {
+  const capabilities = RTCRtpReceiver.getCapabilities("video");
+  if (!capabilities) {
+    return null;
+  }
+  const configuredH264Profile = profile.codec.sdp_fmtp_line
+    .match(/(?:^|;)profile-level-id=([0-9a-f]{2})/i)?.[1]
+    ?.toLowerCase();
+
+  return capabilities.codecs.filter((codec) => {
+    if (codec.mimeType.toLowerCase() !== profile.codec.mime_type.toLowerCase()) {
+      return false;
+    }
+    if (!configuredH264Profile) {
+      return true;
+    }
+    return (
+      codec.sdpFmtpLine?.match(/(?:^|;)profile-level-id=([0-9a-f]{2})/i)?.[1]?.toLowerCase() ===
+      configuredH264Profile
+    );
+  });
 }
 
 export class DesktopConnection {
@@ -239,29 +263,14 @@ export class DesktopConnection {
 
     const videoTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
     videoTransceiver.receiver.jitterBufferTarget = jitterBufferTargetMs;
-    const capabilities = RTCRtpReceiver.getCapabilities("video");
-    if (!capabilities) {
-      throw new Error("browser did not report video codec capabilities");
-    }
     const profile = this.config.video_profiles[this.config.video.profile];
     if (!profile) {
       throw new Error(`video profile ${this.config.video.profile} is unavailable`);
     }
-    const configuredH264Profile = profile.codec.sdp_fmtp_line
-      .match(/(?:^|;)profile-level-id=([0-9a-f]{2})/i)?.[1]
-      ?.toLowerCase();
-    const preferredCodecs = capabilities.codecs.filter((codec) => {
-      if (codec.mimeType.toLowerCase() !== profile.codec.mime_type.toLowerCase()) {
-        return false;
-      }
-      if (!configuredH264Profile) {
-        return true;
-      }
-      return (
-        codec.sdpFmtpLine?.match(/(?:^|;)profile-level-id=([0-9a-f]{2})/i)?.[1]?.toLowerCase() ===
-        configuredH264Profile
-      );
-    });
+    const preferredCodecs = compatibleBrowserVideoCodecs(profile);
+    if (!preferredCodecs) {
+      throw new Error("browser did not report video codec capabilities");
+    }
     if (preferredCodecs.length === 0) {
       throw new Error(`browser does not support ${profile.label}`);
     }

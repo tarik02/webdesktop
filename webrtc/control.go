@@ -389,35 +389,7 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	if request.Quality.Value.BitrateKbps.Set {
 		quality.BitrateKbps = request.Quality.Value.BitrateKbps.Value
 	}
-	err = p.service.source.UpdateQuality(quality)
-	if err == nil {
-		p.service.encoderBitrateKbps.Store(int64(quality.BitrateKbps))
-		err = p.service.applyCongestionBitrateLocked()
-	}
-	effective := p.service.source.Quality()
-	_, currentExists := p.service.source.Profile(qualityCurrent.Profile)
-	effectiveProfile, effectiveExists := p.service.source.Profile(effective.Profile)
-	if err == nil && (!currentExists || !effectiveExists) {
-		err = errors.New("media profile metadata is unavailable after quality update")
-	}
-	requesterNeedsReconnect := err == nil && effectiveExists && (!p.videoCodec.Compatible(effectiveProfile.Codec) ||
-		p.videoFrontendTransform != effectiveProfile.FrontendTransform)
-	var qualityGeneration uint64
-	var incompatiblePeers []*peer
-	if err == nil && currentExists && effectiveExists {
-		for _, candidate := range p.service.peerSnapshot() {
-			if candidate != p && (!candidate.videoCodec.Compatible(effectiveProfile.Codec) ||
-				candidate.videoFrontendTransform != effectiveProfile.FrontendTransform) {
-				incompatiblePeers = append(incompatiblePeers, candidate)
-			}
-		}
-	}
-	if requesterNeedsReconnect || len(incompatiblePeers) > 0 {
-		p.service.qualityMu.Lock()
-		p.service.qualityGeneration++
-		qualityGeneration = p.service.qualityGeneration
-		p.service.qualityMu.Unlock()
-	}
+	result, err := p.service.updateQualityLocked(quality, p)
 	p.service.qualityChangeMu.Unlock()
 	if err != nil {
 		p.writeControlError(channel, request.ID.Value, "quality_update_failed", err.Error())
@@ -428,16 +400,16 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		ID:      request.ID.Value,
 		Type:    controlTypeQualitySetResult,
 		OK:      true,
-		Quality: qualityResponse(effective),
+		Quality: qualityResponse(result.effective),
 	})
-	for _, candidate := range incompatiblePeers {
-		p.service.closePeerForProfileChange(candidate, qualityGeneration)
+	for _, candidate := range result.incompatiblePeers {
+		p.service.closePeerForProfileChange(candidate, result.generation)
 	}
 	if !responseWritten {
 		p.Close()
 		return
 	}
-	if requesterNeedsReconnect {
+	if result.requesterNeedsReconnect {
 		p.Close()
 	}
 }

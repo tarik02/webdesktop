@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tarik02/webdesktop/capture"
@@ -203,6 +204,19 @@ func New(cfg config.Config) (*App, error) {
 					Enabled bool `json:"enabled"`
 				}{Enabled: cfg.Clipboard.Enabled},
 			})
+		})
+		router.PUT("/api/config/video", func(c *gin.Context) {
+			var quality rtc.Quality
+			if err := c.ShouldBindJSON(&quality); err != nil {
+				c.String(http.StatusBadRequest, "invalid video quality request")
+				return
+			}
+			effective, err := webrtcService.UpdateQuality(quality)
+			if err != nil {
+				c.String(http.StatusUnprocessableEntity, err.Error())
+				return
+			}
+			c.JSON(http.StatusOK, effective)
 		})
 		router.GET("/api/status", func(c *gin.Context) {
 			ready := false

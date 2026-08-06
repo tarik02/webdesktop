@@ -19,7 +19,7 @@ const protocolErrorSchema = z
   })
   .strict();
 
-const qualitySchema = z
+export const qualitySchema = z
   .object({
     profile: z.string().min(1),
     option: z.string().min(1),
@@ -297,6 +297,7 @@ export const inputResponseSchema = z
 
 export type ServerConfig = z.infer<typeof serverConfigSchema>;
 export type Quality = z.infer<typeof qualitySchema>;
+export type VideoProfile = z.infer<typeof videoProfileSchema>;
 export type SignalResponse = z.infer<typeof signalResponseSchema>;
 export type ControlResponse = z.infer<typeof controlResponseSchema>;
 export type ClipboardMessage = z.infer<typeof clipboardMessageSchema>;
