@@ -99,6 +99,13 @@ When tracing is enabled, the embedded client may send bounded diagnostics:
 Valid levels are `debug`, `info`, `warn`, and `error`. Client logs cannot
 contain SDP or ICE candidates.
 
+## Disconnected video quality
+
+When the configured video profile is unsupported and WebRTC cannot connect,
+the embedded client sends the same complete quality object to
+`PUT /api/config/video`. The response contains the effective quality. This
+allows selecting another encoder before starting a new WebRTC connection.
+
 ## Control channel
 
 Control messages are UTF-8 JSON text up to 16 KiB. Each request has a

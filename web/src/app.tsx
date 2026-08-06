@@ -28,6 +28,7 @@ import { NativeSelect, NativeSelectOption } from "#/components/ui/native-select.
 import { Popover, PopoverContent, PopoverTrigger } from "#/components/ui/popover.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "#/components/ui/tooltip.tsx";
 import {
+  compatibleBrowserVideoCodecs,
   DesktopConnection,
   ProtocolError,
   type ConnectionState,
@@ -36,6 +37,7 @@ import {
 import { evdevKeycode } from "#/lib/keyboard.ts";
 import {
   clipboardMIMESchema,
+  qualitySchema,
   serverConfigSchema,
   type Quality,
   type ClipboardFormat,
@@ -362,23 +364,13 @@ export function App() {
       return;
     }
     if (connectionState.phase === "error") {
+      const activeProfile = config.video_profiles[config.video.profile];
+      const compatibleCodecs = activeProfile ? compatibleBrowserVideoCodecs(activeProfile) : null;
+      if (!compatibleCodecs || compatibleCodecs.length === 0) {
+        return;
+      }
       const retry = window.setTimeout(() => {
-        void fetch("/api/config")
-          .then(async (response) => {
-            if (!response.ok) {
-              throw new Error(`service configuration returned ${response.status}`);
-            }
-            return serverConfigSchema.parse(await response.json());
-          })
-          .then((loaded) => {
-            setConfig(loaded);
-            setQuality(loaded.video);
-            setAppliedQuality(loaded.video);
-            setConnectionState({ phase: "idle" });
-          })
-          .catch(() => {
-            setConnectionState({ phase: "idle" });
-          });
+        setConnectionState({ phase: "idle" });
       }, 1000);
       return () => window.clearTimeout(retry);
     }
@@ -449,7 +441,7 @@ export function App() {
 
   const applyQuality = async (event: FormEvent) => {
     event.preventDefault();
-    if (!config || !quality || !appliedQuality || !connectionRef.current) {
+    if (!config || !quality || !appliedQuality) {
       return;
     }
     setError(null);
@@ -462,11 +454,30 @@ export function App() {
       const clientProfileChanged =
         currentProfile.codec.id !== nextProfile.codec.id ||
         currentProfile.frontend_transform !== nextProfile.frontend_transform;
-      const nextQuality = await connectionRef.current.setQuality(quality);
+      let nextQuality: Quality;
+      if (connected && connectionRef.current) {
+        nextQuality = await connectionRef.current.setQuality(quality);
+      } else {
+        await disconnect();
+        const response = await fetch("/api/config/video", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(quality),
+        });
+        if (!response.ok) {
+          const message = await response.text();
+          throw new Error(message || `video quality update returned ${response.status}`);
+        }
+        nextQuality = qualitySchema.parse(await response.json());
+      }
       setQualityOpen(false);
       setConfig((current) => (current ? { ...current, video: nextQuality } : current));
+      setQuality(nextQuality);
+      setAppliedQuality(nextQuality);
       if (clientProfileChanged) {
         await reconnect();
+      } else if (!connected) {
+        setConnectionState({ phase: "idle" });
       }
     } catch (cause) {
       setError(errorMessage(cause));
@@ -775,9 +786,13 @@ export function App() {
 
   const connected = connectionState.phase === "connected";
   const profileOptions = config
-    ? Object.entries(config.video_profiles).sort((left, right) =>
-        left[1].label.localeCompare(right[1].label),
-      )
+    ? Object.entries(config.video_profiles)
+        .map(([name, profile]) => ({
+          name,
+          profile,
+          supported: (compatibleBrowserVideoCodecs(profile)?.length ?? 0) > 0,
+        }))
+        .sort((left, right) => left.profile.label.localeCompare(right.profile.label))
     : [];
   const selectedProfile = config && quality ? config.video_profiles[quality.profile] : null;
   const qualityOptions = selectedProfile
@@ -928,7 +943,7 @@ export function App() {
             <PopoverContent className="w-[min(22rem,calc(100vw-1.5rem))]" align="end" side="bottom">
               <form id="quality-form" onSubmit={(event) => void applyQuality(event)}>
                 <FieldGroup>
-                  <FieldSet className="grid grid-cols-2 gap-3" disabled={!connected || !quality}>
+                  <FieldSet className="grid grid-cols-2 gap-3" disabled={!quality}>
                     <Field>
                       <FieldLabel htmlFor="quality-profile">Encoder</FieldLabel>
                       <NativeSelect
@@ -951,9 +966,10 @@ export function App() {
                           }
                         }}
                       >
-                        {profileOptions.map(([name, profile]) => (
-                          <NativeSelectOption key={name} value={name}>
+                        {profileOptions.map(({ name, profile, supported }) => (
+                          <NativeSelectOption key={name} value={name} disabled={!supported}>
                             {profile.label}
+                            {supported ? "" : " (unsupported)"}
                           </NativeSelectOption>
                         ))}
                       </NativeSelect>
@@ -1073,7 +1089,6 @@ export function App() {
                   <Button
                     type="submit"
                     disabled={
-                      !connected ||
                       !quality ||
                       (quality.profile === appliedQuality?.profile &&
                         quality.option === appliedQuality.option &&
