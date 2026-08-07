@@ -120,7 +120,7 @@ when the session manager does not provide it:
 # ~/.config/systemd/user/xdg-desktop-portal.service.d/kde.conf
 [Unit]
 Requires=plasma-xdg-desktop-portal-kde.service
-After=plasma-xdg-desktop-portal-kde.service
+After=plasma-kwin_wayland.service plasma-xdg-desktop-portal-kde.service
 PartOf=plasma-kwin_wayland.service plasma-xdg-desktop-portal-kde.service
 ```
 

@@ -1,7 +1,7 @@
 [Unit]
 Description=Webdesktop remote desktop service
 Requires=xdg-desktop-portal.service plasma-xdg-desktop-portal-kde.service
-After=xdg-desktop-portal.service plasma-xdg-desktop-portal-kde.service
+After=plasma-kwin_wayland.service xdg-desktop-portal.service plasma-xdg-desktop-portal-kde.service
 PartOf=graphical-session.target plasma-kwin_wayland.service xdg-desktop-portal.service plasma-xdg-desktop-portal-kde.service
 
 [Service]
