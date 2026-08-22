@@ -39,14 +39,16 @@ The portal PipeWire connection stays open for the service lifetime. Capture
 and encoding use separate GStreamer pipelines so an encoder change does not
 rebuild or pause the portal stream.
 
-`pipewiresrc` negotiates DMA-BUF before system memory and retains four to eight
-capture buffers so the compositor can keep exporting frames without forced
-copies. DMA-BUF-backed samples keep their memory through the latest-frame slot
-and encoder appsrc. The capture appsink keeps one sample. An application-owned
-single-frame slot feeds a one-buffer leaky encoder appsrc. If encoding slows down, each layer
-drops obsolete raw frames instead of blocking PipeWire or accumulating stale
-video. The portal capture session stays open while the service is idle, but raw
-frames only enter the encoder while at least one WebRTC peer is registered.
+`pipewiresrc` requests system-memory raw video and copies each captured frame
+out of the PipeWire buffer pool. This copy boundary prevents the latest-frame
+slot and encoder branches from keeping portal capture buffers checked out while
+an encoder still owns the frame. After the copy, encoder branches may share the
+application-owned memory. The capture appsink keeps one sample. An
+application-owned single-frame slot feeds a one-buffer leaky encoder appsrc. If
+encoding slows down, each layer drops obsolete raw frames instead of blocking
+PipeWire or accumulating stale video. The portal capture session stays open
+while the service is idle, but raw frames only enter the encoder while at least
+one WebRTC peer is registered.
 
 `pipewiresrc` uses a frame keepalive based on the configured frame rate. This
 resends the latest buffer when the compositor provides damage-driven updates,
