@@ -806,8 +806,11 @@ func newPersistentVideoPipeline(
 	if err := source.SetProperty("provide-clock", false); err != nil {
 		return nil, fmt.Errorf("disable pipewiresrc pipeline clock: %w", err)
 	}
-	if err := source.SetProperty("always-copy", false); err != nil {
-		return nil, fmt.Errorf("enable zero-copy pipewiresrc buffers: %w", err)
+	// Encoder branches retain frames after the capture callback returns. Sharing
+	// PipeWire pool buffers here can exhaust the portal's pool while an encoder
+	// still owns them and stall capture until those buffers are released.
+	if err := source.SetProperty("use-bufferpool", false); err != nil {
+		return nil, fmt.Errorf("disable PipeWire source buffer pool: %w", err)
 	}
 	if err := source.SetProperty("min-buffers", 4); err != nil {
 		return nil, fmt.Errorf("set minimum PipeWire capture buffers: %w", err)
@@ -818,7 +821,7 @@ func newPersistentVideoPipeline(
 	if err := source.SetProperty("keepalive-time", 1000/quality.Framerate); err != nil {
 		return nil, fmt.Errorf("set pipewiresrc frame keepalive: %w", err)
 	}
-	captureCaps := gst.NewCapsFromString("video/x-raw(memory:DMABuf);video/x-raw")
+	captureCaps := gst.NewCapsFromString("video/x-raw")
 	if captureCaps == nil {
 		return nil, errors.New("create PipeWire capture caps")
 	}
