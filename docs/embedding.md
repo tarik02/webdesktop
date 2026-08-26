@@ -73,7 +73,9 @@ if err != nil {
 	return err
 }
 
-mux.Handle("/sessions/example/webrtc", authMiddleware(service.Handler()))
+mux.Handle("/sessions/example/webrtc", authMiddleware(service.Handler(webrtc.PeerOptions{
+	AllowQualityUpdates: true,
+})))
 go service.Run(ctx)
 ```
 

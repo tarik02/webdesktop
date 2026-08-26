@@ -33,6 +33,7 @@ const (
 type peer struct {
 	id      uint64
 	service *Service
+	options PeerOptions
 	logger  *zap.Logger
 	conn    *websocket.Conn
 	pc      *pion.PeerConnection
@@ -139,7 +140,7 @@ func (p *peer) goOwned(fn func()) bool {
 	return true
 }
 
-func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
+func (s *Service) newPeer(connection *websocket.Conn, options PeerOptions) (*peer, error) {
 	id, err := s.reservePeer()
 	if err != nil {
 		return nil, err
@@ -180,6 +181,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 	peer := &peer{
 		id:                     id,
 		service:                s,
+		options:                options,
 		logger:                 peerLogger,
 		conn:                   connection,
 		pc:                     peerConnection,

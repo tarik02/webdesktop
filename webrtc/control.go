@@ -195,6 +195,11 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 	}
 
 	switch request.Type.Value {
+	case controlTypeQualitySet:
+		if !p.options.AllowQualityUpdates {
+			p.writeControlError(channel, request.ID.Value, "quality_updates_disabled", "video quality updates are disabled for this peer")
+			return
+		}
 	case controlTypeTargetSelect:
 		targeted, ok := p.service.source.(TargetMediaSource)
 		if !ok {

@@ -139,6 +139,11 @@ type Service struct {
 	keyframeRequests   chan keyframeRequest
 }
 
+// PeerOptions controls the capabilities granted to peers accepted by one handler.
+type PeerOptions struct {
+	AllowQualityUpdates bool
+}
+
 type keyframeRequest struct {
 	peerID uint64
 	reason string
@@ -215,7 +220,7 @@ func New(
 }
 
 // Handler returns the signaling handler for mounting behind application middleware.
-func (s *Service) Handler() http.Handler {
+func (s *Service) Handler(options PeerOptions) http.Handler {
 	upgrader := websocket.Upgrader{
 		HandshakeTimeout: defaultSignalingWriteTimeout,
 		CheckOrigin:      s.originAllowed,
@@ -233,7 +238,7 @@ func (s *Service) Handler() http.Handler {
 			s.replaceActivePeer()
 		}
 
-		peer, err := s.newPeer(connection)
+		peer, err := s.newPeer(connection, options)
 		s.admitMu.Unlock()
 		if err != nil {
 			code := "internal_error"
