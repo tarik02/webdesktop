@@ -458,6 +458,26 @@ func (s *Service) SendApplication(peerID uint64, channel ApplicationChannel, mes
 	return peer.sendApplication(channel, message)
 }
 
+// SelectTarget switches one connected peer to an application-selected media target.
+// It returns after the target source has accepted a frame for that peer.
+func (s *Service) SelectTarget(ctx context.Context, peerID uint64, targetID string) (TargetSelection, error) {
+	peer := s.findPeer(peerID)
+	if peer == nil {
+		return TargetSelection{}, ErrPeerNotFound
+	}
+	targeted, ok := s.source.(TargetMediaSource)
+	if !ok {
+		return TargetSelection{}, errors.New("media source does not support target selection")
+	}
+	if !peer.connected.Load() {
+		return TargetSelection{}, errors.New("WebRTC peer is not connected")
+	}
+	generation := peer.targetGeneration.Add(1)
+	peer.videoNeedsKeyframe.Store(true)
+	peer.videoSamples.clear()
+	return targeted.SelectTarget(ctx, peer.id, generation, targetID)
+}
+
 // UpdateQuality changes the shared encoder quality outside a peer control channel.
 func (s *Service) UpdateQuality(quality Quality) (Quality, error) {
 	s.qualityChangeMu.Lock()

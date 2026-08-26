@@ -95,7 +95,9 @@ reliable ordered data channel and an `application-realtime` unordered data
 channel with `maxRetransmits: 0`. The handler receives channel open, message,
 and close callbacks. `Service.SendApplication` sends text or binary messages to
 either channel by peer ID. Messages are limited to 1 MiB. Webdesktop treats
-their contents as opaque application data.
+their contents as opaque application data. `Service.SelectTarget` lets the
+embedding application bind its own target-selection command to the peer's media
+source without using webdesktop's control protocol.
 
 The signaling, control, input, and clipboard messages remain defined in
 [`protocol.md`](protocol.md). A custom frontend can implement that protocol

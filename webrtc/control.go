@@ -205,8 +205,7 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 			return
 		}
 	case controlTypeTargetSelect:
-		targeted, ok := p.service.source.(TargetMediaSource)
-		if !ok {
+		if _, ok := p.service.source.(TargetMediaSource); !ok {
 			p.writeControlError(channel, request.ID.Value, "target_selection_disabled", "media source does not support target selection")
 			return
 		}
@@ -216,15 +215,12 @@ func (p *peer) handleControlMessage(channel *pion.DataChannel, message pion.Data
 		}
 		requestID := request.ID.Value
 		targetID := request.TargetID.Value
-		generation := p.targetGeneration.Add(1)
 		p.inputMu.Lock()
 		p.inputLeaseGeneration++
 		p.inputMu.Unlock()
 		_ = p.service.input.Release(p.id)
-		p.videoNeedsKeyframe.Store(true)
-		p.videoSamples.clear()
 		p.goOwned(func() {
-			selection, err := targeted.SelectTarget(p.ctx, p.id, generation, targetID)
+			selection, err := p.service.SelectTarget(p.ctx, p.id, targetID)
 			p.controlMu.Lock()
 			currentControl := p.control == channel
 			p.controlMu.Unlock()
