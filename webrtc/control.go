@@ -28,6 +28,10 @@ func (p *peer) onDataChannel(channel *pion.DataChannel) {
 		} else {
 			_ = channel.Close()
 		}
+	case "application":
+		p.setApplicationChannel(channel, ApplicationChannelReliable)
+	case "application-realtime":
+		p.setApplicationChannel(channel, ApplicationChannelRealtime)
 	default:
 		p.logger.Info("rejecting unsupported data channel", zap.String("label", channel.Label()))
 		_ = channel.Close()

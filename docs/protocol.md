@@ -6,6 +6,8 @@ clipboard messages use version 1. The client creates these WebRTC data channels:
 - `control`, reliable and ordered
 - `input`, reliable and ordered
 - `input-motion`, unordered with zero retransmits
+- `application`, reliable and ordered when the embedding application enables it
+- `application-realtime`, unordered with zero retransmits when the embedding application enables it
 - `clipboard`, reliable and ordered when clipboard synchronization is enabled
 
 One WebSocket owns one peer connection. It accepts one offer and does not

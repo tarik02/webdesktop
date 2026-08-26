@@ -49,6 +49,7 @@ type Config struct {
 	AllowedOrigins      []string
 	TracingEnabled      bool
 	Observer            Observer
+	ApplicationHandler  ApplicationHandler
 }
 
 // Validate checks the implemented transport settings.
@@ -142,6 +143,8 @@ type Service struct {
 // PeerOptions controls the capabilities granted to peers accepted by one handler.
 type PeerOptions struct {
 	AllowQualityUpdates bool
+	// Metadata is opaque application-owned identity attached after authentication.
+	Metadata any
 }
 
 type keyframeRequest struct {
@@ -446,6 +449,15 @@ func (s *Service) PeerCount() int {
 	return s.reservations
 }
 
+// SendApplication sends one application-owned message to an active peer.
+func (s *Service) SendApplication(peerID uint64, channel ApplicationChannel, message ApplicationMessage) error {
+	peer := s.findPeer(peerID)
+	if peer == nil {
+		return ErrPeerNotFound
+	}
+	return peer.sendApplication(channel, message)
+}
+
 // UpdateQuality changes the shared encoder quality outside a peer control channel.
 func (s *Service) UpdateQuality(quality Quality) (Quality, error) {
 	s.qualityChangeMu.Lock()
@@ -733,6 +745,17 @@ func (s *Service) peerSnapshot() []*peer {
 	return peers
 }
 
+func (s *Service) findPeer(id uint64) *peer {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	for peer := range s.peers {
+		if peer.id == id && !peer.isClosing() {
+			return peer
+		}
+	}
+	return nil
+}
+
 func (s *Service) replaceActivePeer() {
 	s.peersMu.Lock()
 	peers := make([]*peer, 0, len(s.peers))
@@ -752,8 +775,8 @@ func (s *Service) replaceActivePeer() {
 	}
 }
 
-func (s *Service) peerInfo(id uint64) PeerInfo {
-	return PeerInfo{ID: id, ActivePeers: s.PeerCount()}
+func (s *Service) peerInfo(peer *peer) PeerInfo {
+	return PeerInfo{ID: peer.id, ActivePeers: s.PeerCount(), Metadata: peer.options.Metadata}
 }
 
 func (s *Service) closePeerForProfileChange(peer *peer, generation uint64) {

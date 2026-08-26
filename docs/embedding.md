@@ -13,6 +13,7 @@ contracts:
 - `InputController` owns peer leases and receives validated input events.
 - `ClipboardController` synchronizes clipboard content when enabled.
 - `Observer` optionally receives peer open, connection-state, and close events.
+- `ApplicationHandler` optionally receives reliable and realtime application-channel events.
 
 The media source returns complete encoded access units rather than RTP packets.
 The transport performs RTP packetization, timing, fan-out, RTCP handling, and
@@ -75,6 +76,7 @@ if err != nil {
 
 mux.Handle("/sessions/example/webrtc", authMiddleware(service.Handler(webrtc.PeerOptions{
 	AllowQualityUpdates: true,
+	Metadata:            authenticatedPrincipal,
 })))
 go service.Run(ctx)
 ```
@@ -83,6 +85,17 @@ When `ReplaceExistingPeer` is enabled, `MaxPeers` must be `1`. A new signaling
 connection closes the current peer and waits for its resources to be released
 before creating the replacement. This fits session supervisors where the most
 recent viewer owns the session.
+
+Authenticated applications may attach opaque `PeerOptions.Metadata` after their
+HTTP middleware has authorized the signaling request. `PeerInfo` returns that
+metadata to `Observer` and `ApplicationHandler` callbacks.
+
+When `Config.ApplicationHandler` is set, peers may open an `application`
+reliable ordered data channel and an `application-realtime` unordered data
+channel with `maxRetransmits: 0`. The handler receives channel open, message,
+and close callbacks. `Service.SendApplication` sends text or binary messages to
+either channel by peer ID. Messages are limited to 1 MiB. Webdesktop treats
+their contents as opaque application data.
 
 The signaling, control, input, and clipboard messages remain defined in
 [`protocol.md`](protocol.md). A custom frontend can implement that protocol

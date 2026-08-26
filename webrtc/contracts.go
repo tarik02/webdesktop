@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/tarik02/webdesktop/clipboard"
@@ -22,6 +23,9 @@ var (
 	ErrInputNotOwner             = remoteinput.ErrNotOwner
 	ErrInputOverloaded           = remoteinput.ErrOverloaded
 	ErrInputClosed               = remoteinput.ErrClosed
+	ErrPeerNotFound              = errors.New("WebRTC peer not found")
+	ErrApplicationUnavailable    = errors.New("application data channel is unavailable")
+	ErrApplicationMessageLarge   = errors.New("application message exceeds 1048576 bytes")
 )
 
 // Quality contains runtime-adjustable video settings.
@@ -232,10 +236,33 @@ type ClipboardController interface {
 	Subscribe() (<-chan clipboard.Content, func())
 }
 
+// ApplicationChannel identifies an application-owned data channel.
+type ApplicationChannel string
+
+const (
+	ApplicationChannelReliable ApplicationChannel = "reliable"
+	ApplicationChannelRealtime ApplicationChannel = "realtime"
+)
+
+// ApplicationMessage is one application-owned text or binary message.
+type ApplicationMessage struct {
+	Data     []byte
+	IsString bool
+}
+
+// ApplicationHandler receives application data-channel lifecycle and messages.
+// Implementations must return promptly. Reliable messages arrive in channel order.
+type ApplicationHandler interface {
+	ApplicationChannelOpened(PeerInfo, ApplicationChannel)
+	ApplicationMessageReceived(PeerInfo, ApplicationChannel, ApplicationMessage)
+	ApplicationChannelClosed(PeerInfo, ApplicationChannel)
+}
+
 // PeerInfo identifies one transport peer.
 type PeerInfo struct {
 	ID          uint64
 	ActivePeers int
+	Metadata    any
 }
 
 // Observer receives peer lifecycle notifications.
