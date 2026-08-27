@@ -33,6 +33,7 @@ const (
 type peer struct {
 	id      uint64
 	service *Service
+	options PeerOptions
 	logger  *zap.Logger
 	conn    *websocket.Conn
 	pc      *pion.PeerConnection
@@ -61,10 +62,12 @@ type peer struct {
 	congestionBitrate  atomic.Int64
 	targetGeneration   atomic.Uint64
 
-	signalWriteMu    sync.Mutex
-	controlWriteMu   sync.Mutex
-	inputWriteMu     sync.Mutex
-	clipboardWriteMu sync.Mutex
+	signalWriteMu              sync.Mutex
+	controlWriteMu             sync.Mutex
+	inputWriteMu               sync.Mutex
+	clipboardWriteMu           sync.Mutex
+	applicationWriteReliableMu sync.Mutex
+	applicationWriteRealtimeMu sync.Mutex
 
 	offerHandled             bool
 	remoteDescriptionSet     bool
@@ -81,6 +84,9 @@ type peer struct {
 	clipboardMu              sync.Mutex
 	clipboardState           *clipboardChannelState
 	clipboardSequence        uint64
+	applicationMu            sync.Mutex
+	applicationReliable      *applicationDataChannel
+	applicationRealtime      *applicationDataChannel
 	inputSequence            uint64
 	inputSequenceSet         bool
 	inputMotionSequence      uint64
@@ -139,7 +145,7 @@ func (p *peer) goOwned(fn func()) bool {
 	return true
 }
 
-func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
+func (s *Service) newPeer(connection *websocket.Conn, options PeerOptions) (*peer, error) {
 	id, err := s.reservePeer()
 	if err != nil {
 		return nil, err
@@ -180,6 +186,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 	peer := &peer{
 		id:                     id,
 		service:                s,
+		options:                options,
 		logger:                 peerLogger,
 		conn:                   connection,
 		pc:                     peerConnection,
@@ -240,7 +247,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 		}
 		peer.logger.Info("peer connection state changed", zap.String("state", state.String()))
 		if s.cfg.Observer != nil {
-			s.cfg.Observer.PeerStateChanged(s.peerInfo(peer.id), state.String())
+			s.cfg.Observer.PeerStateChanged(s.peerInfo(peer), state.String())
 		}
 		switch state {
 		case pion.PeerConnectionStateConnected:
@@ -303,7 +310,7 @@ func (s *Service) newPeer(connection *websocket.Conn) (*peer, error) {
 	}
 	peer.logger.Info("WebRTC peer created", zap.Int("active_peers", s.PeerCount()))
 	if s.cfg.Observer != nil {
-		s.cfg.Observer.PeerOpened(s.peerInfo(peer.id))
+		s.cfg.Observer.PeerOpened(s.peerInfo(peer))
 	}
 	return peer, nil
 }
@@ -763,6 +770,7 @@ func (p *peer) closeWith(code int, reason string) {
 		p.inputMu.Unlock()
 		p.cancel()
 		_ = p.service.input.Release(p.id)
+		p.closeApplicationChannels()
 		go p.finishClose(code, reason)
 	})
 }
@@ -787,7 +795,7 @@ func (p *peer) finishClose(code int, reason string) {
 		p.service.releaseReservation()
 		close(p.done)
 		if p.service.cfg.Observer != nil {
-			p.service.cfg.Observer.PeerClosed(p.service.peerInfo(p.id))
+			p.service.cfg.Observer.PeerClosed(p.service.peerInfo(p))
 		}
 		p.logger.Info("WebRTC peer closed", zap.Int("active_peers", p.service.PeerCount()))
 	})

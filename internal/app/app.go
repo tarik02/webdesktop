@@ -237,7 +237,7 @@ func New(cfg config.Config) (*App, error) {
 				Video:       mediaService.Quality(),
 			})
 		})
-		router.GET(cfg.WebRTC.SignalingPath, gin.WrapH(webrtcService.Handler()))
+		router.GET(cfg.WebRTC.SignalingPath, gin.WrapH(webrtcService.Handler(rtc.PeerOptions{AllowQualityUpdates: true})))
 		webui.Mount(router)
 	})
 	if err != nil {

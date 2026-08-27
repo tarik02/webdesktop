@@ -49,6 +49,7 @@ type Config struct {
 	AllowedOrigins      []string
 	TracingEnabled      bool
 	Observer            Observer
+	ApplicationHandler  ApplicationHandler
 }
 
 // Validate checks the implemented transport settings.
@@ -139,6 +140,14 @@ type Service struct {
 	keyframeRequests   chan keyframeRequest
 }
 
+// PeerOptions controls the capabilities granted to peers accepted by one handler.
+type PeerOptions struct {
+	AllowQualityUpdates     bool
+	ApplicationChannelsOnly bool
+	// Metadata is opaque application-owned identity attached after authentication.
+	Metadata any
+}
+
 type keyframeRequest struct {
 	peerID uint64
 	reason string
@@ -215,7 +224,7 @@ func New(
 }
 
 // Handler returns the signaling handler for mounting behind application middleware.
-func (s *Service) Handler() http.Handler {
+func (s *Service) Handler(options PeerOptions) http.Handler {
 	upgrader := websocket.Upgrader{
 		HandshakeTimeout: defaultSignalingWriteTimeout,
 		CheckOrigin:      s.originAllowed,
@@ -233,7 +242,7 @@ func (s *Service) Handler() http.Handler {
 			s.replaceActivePeer()
 		}
 
-		peer, err := s.newPeer(connection)
+		peer, err := s.newPeer(connection, options)
 		s.admitMu.Unlock()
 		if err != nil {
 			code := "internal_error"
@@ -439,6 +448,35 @@ func (s *Service) PeerCount() int {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
 	return s.reservations
+}
+
+// SendApplication sends one application-owned message to an active peer.
+func (s *Service) SendApplication(peerID uint64, channel ApplicationChannel, message ApplicationMessage) error {
+	peer := s.findPeer(peerID)
+	if peer == nil {
+		return ErrPeerNotFound
+	}
+	return peer.sendApplication(channel, message)
+}
+
+// SelectTarget switches one connected peer to an application-selected media target.
+// It returns after the target source has accepted a frame for that peer.
+func (s *Service) SelectTarget(ctx context.Context, peerID uint64, targetID string) (TargetSelection, error) {
+	peer := s.findPeer(peerID)
+	if peer == nil {
+		return TargetSelection{}, ErrPeerNotFound
+	}
+	targeted, ok := s.source.(TargetMediaSource)
+	if !ok {
+		return TargetSelection{}, errors.New("media source does not support target selection")
+	}
+	if !peer.connected.Load() {
+		return TargetSelection{}, errors.New("WebRTC peer is not connected")
+	}
+	generation := peer.targetGeneration.Add(1)
+	peer.videoNeedsKeyframe.Store(true)
+	peer.videoSamples.clear()
+	return targeted.SelectTarget(ctx, peer.id, generation, targetID)
 }
 
 // UpdateQuality changes the shared encoder quality outside a peer control channel.
@@ -728,6 +766,17 @@ func (s *Service) peerSnapshot() []*peer {
 	return peers
 }
 
+func (s *Service) findPeer(id uint64) *peer {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	for peer := range s.peers {
+		if peer.id == id && !peer.isClosing() {
+			return peer
+		}
+	}
+	return nil
+}
+
 func (s *Service) replaceActivePeer() {
 	s.peersMu.Lock()
 	peers := make([]*peer, 0, len(s.peers))
@@ -747,8 +796,8 @@ func (s *Service) replaceActivePeer() {
 	}
 }
 
-func (s *Service) peerInfo(id uint64) PeerInfo {
-	return PeerInfo{ID: id, ActivePeers: s.PeerCount()}
+func (s *Service) peerInfo(peer *peer) PeerInfo {
+	return PeerInfo{ID: peer.id, ActivePeers: s.PeerCount(), Metadata: peer.options.Metadata}
 }
 
 func (s *Service) closePeerForProfileChange(peer *peer, generation uint64) {
