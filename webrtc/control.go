@@ -15,6 +15,11 @@ func (p *peer) onDataChannel(channel *pion.DataChannel) {
 		_ = channel.Close()
 		return
 	}
+	if p.options.ApplicationChannelsOnly && channel.Label() != "application" && channel.Label() != "application-realtime" {
+		p.logger.Info("rejecting disabled data channel", zap.String("label", channel.Label()))
+		_ = channel.Close()
+		return
+	}
 	switch channel.Label() {
 	case "control":
 		p.setControlChannel(channel)

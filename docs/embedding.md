@@ -99,6 +99,10 @@ their contents as opaque application data. `Service.SelectTarget` lets the
 embedding application bind its own target-selection command to the peer's media
 source without using webdesktop's control protocol.
 
+Set `PeerOptions.ApplicationChannelsOnly` when the embedding application owns
+control and input. Such peers may open only the two application channels;
+webdesktop rejects its native control, input, motion, and clipboard channels.
+
 The signaling, control, input, and clipboard messages remain defined in
 [`protocol.md`](protocol.md). A custom frontend can implement that protocol
 without using the bundled web application.

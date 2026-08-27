@@ -142,7 +142,8 @@ type Service struct {
 
 // PeerOptions controls the capabilities granted to peers accepted by one handler.
 type PeerOptions struct {
-	AllowQualityUpdates bool
+	AllowQualityUpdates     bool
+	ApplicationChannelsOnly bool
 	// Metadata is opaque application-owned identity attached after authentication.
 	Metadata any
 }
