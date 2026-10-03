@@ -43,6 +43,10 @@ const inboundVideoStatsSchema = z
     totalFreezesDuration: z.number().optional(),
     totalDecodeTime: z.number().optional(),
     totalProcessingDelay: z.number().optional(),
+    totalInterFrameDelay: z.number().optional(),
+    totalSquaredInterFrameDelay: z.number().optional(),
+    decoderImplementation: z.string().optional(),
+    powerEfficientDecoder: z.boolean().optional(),
   })
   .refine((stats) => stats.kind === "video" || stats.mediaType === "video");
 
@@ -75,6 +79,9 @@ export type PerformanceStats = {
   jitterBufferMinimumMs: number | null;
   decodeMsPerFrame: number | null;
   processingDelayMsPerFrame: number | null;
+  frameIntervalStddevMs: number | null;
+  decoderImplementation: string | null;
+  powerEfficientDecoder: boolean | null;
   framesDropped: number;
   intervalFramesDropped: number | null;
   freezeCount: number;
@@ -799,6 +806,26 @@ export class DesktopConnection {
         ? ((inbound.totalProcessingDelay - previous.totalProcessingDelay) / framesDecodedDelta) *
           1000
         : null;
+    // Standard deviation of the gap between decoded frames over the interval.
+    // Uneven pacing reads as stutter even when the average frame rate is high.
+    const frameIntervalStddevMs =
+      framesDecodedDelta !== null &&
+      framesDecodedDelta > 1 &&
+      inbound.totalInterFrameDelay !== undefined &&
+      inbound.totalSquaredInterFrameDelay !== undefined &&
+      previous?.totalInterFrameDelay !== undefined &&
+      previous.totalSquaredInterFrameDelay !== undefined
+        ? Math.sqrt(
+            Math.max(
+              0,
+              (inbound.totalSquaredInterFrameDelay - previous.totalSquaredInterFrameDelay) /
+                framesDecodedDelta -
+                ((inbound.totalInterFrameDelay - previous.totalInterFrameDelay) /
+                  framesDecodedDelta) **
+                  2,
+            ),
+          ) * 1000
+        : null;
     const intervalFramesDropped =
       previous &&
       inbound.framesDropped !== undefined &&
@@ -841,6 +868,9 @@ export class DesktopConnection {
       jitterBufferMinimumMs,
       decodeMsPerFrame,
       processingDelayMsPerFrame,
+      frameIntervalStddevMs,
+      decoderImplementation: inbound.decoderImplementation ?? null,
+      powerEfficientDecoder: inbound.powerEfficientDecoder ?? null,
       framesDropped: inbound.framesDropped ?? 0,
       intervalFramesDropped,
       freezeCount: inbound.freezeCount ?? 0,
@@ -1383,6 +1413,15 @@ export class DesktopConnection {
           stats.processingDelayMsPerFrame === null
             ? "unavailable"
             : stats.processingDelayMsPerFrame.toFixed(2),
+        frame_interval_stddev_ms:
+          stats.frameIntervalStddevMs === null
+            ? "unavailable"
+            : stats.frameIntervalStddevMs.toFixed(2),
+        decoder_implementation: stats.decoderImplementation ?? "unavailable",
+        power_efficient_decoder:
+          stats.powerEfficientDecoder === null
+            ? "unavailable"
+            : String(stats.powerEfficientDecoder),
         frames_dropped: String(stats.framesDropped),
         interval_frames_dropped:
           stats.intervalFramesDropped === null

@@ -15,7 +15,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/cc"
-	"github.com/pion/interceptor/pkg/gcc"
 	"github.com/pion/stun/v3"
 	pion "github.com/pion/webrtc/v4"
 	"go.uber.org/zap"
@@ -576,11 +575,9 @@ func (s *Service) newPeerConnection(
 
 	registry := &interceptor.Registry{}
 	congestionController, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
-		return gcc.NewSendSideBWE(
-			gcc.SendSideBWEInitialBitrate(initialBitrate),
-			gcc.SendSideBWEMinBitrate(100_000),
-			gcc.SendSideBWEPacer(gcc.NewNoOpPacer()),
-		)
+		return newBandwidthEstimator(initialBitrate, func() int {
+			return int(s.encoderBitrateKbps.Load()) * 1000
+		})
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("configure congestion controller: %w", err)
@@ -663,7 +660,10 @@ func (s *Service) applyCongestionBitrateLocked() error {
 	if bitrateDifferenceKbps < 0 {
 		bitrateDifferenceKbps = -bitrateDifferenceKbps
 	}
-	if bitrateDifferenceKbps < max(encoderBitrateMinStepKbps, currentEncoderBitrateKbps/encoderBitrateStepDivisor) {
+	// Returning to the requested bitrate bypasses hysteresis so a recovered
+	// estimate does not leave the encoder parked just below the user's cap.
+	if encoderBitrateKbps != requestedBitrateKbps &&
+		bitrateDifferenceKbps < max(encoderBitrateMinStepKbps, currentEncoderBitrateKbps/encoderBitrateStepDivisor) {
 		return nil
 	}
 	if err := s.source.SetBitrate(encoderBitrateKbps); err != nil {

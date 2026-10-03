@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/interceptor/pkg/cc"
 	pion "github.com/pion/webrtc/v4"
 	"go.uber.org/zap"
 )
@@ -60,6 +61,7 @@ type peer struct {
 	connected          atomic.Bool
 	videoNeedsKeyframe atomic.Bool
 	congestionBitrate  atomic.Int64
+	bandwidth          cc.BandwidthEstimator
 	targetGeneration   atomic.Uint64
 
 	signalWriteMu              sync.Mutex
@@ -180,7 +182,7 @@ func (s *Service) newPeer(connection *websocket.Conn, options PeerOptions) (*pee
 		profile.Codec.Payloader,
 		pion.RTPCodecTypeVideo,
 		fmt.Sprintf("video-%d", id),
-		"desktop",
+		"desktop-video",
 	)
 	peerLogger := s.logger.With(zap.Uint64("peer_id", id))
 	peer := &peer{
@@ -195,6 +197,7 @@ func (s *Service) newPeer(connection *websocket.Conn, options PeerOptions) (*pee
 		videoCodec:             profile.Codec,
 		videoFrontendTransform: profile.FrontendTransform,
 		videoSamples:           newVideoMailbox(),
+		bandwidth:              estimator,
 		ctx:                    ctx,
 		cancel:                 cancel,
 		done:                   make(chan struct{}),
@@ -229,7 +232,9 @@ func (s *Service) newPeer(connection *websocket.Conn, options PeerOptions) (*pee
 			payloaderOpus,
 			pion.RTPCodecTypeAudio,
 			fmt.Sprintf("audio-%d", id),
-			"desktop",
+			// A separate stream keeps the browser from delaying video to
+			// synchronize it with audio.
+			"desktop-audio",
 		)
 		peer.audioSamples = newAudioMailbox()
 		audioSender, err := peerConnection.AddTrack(peer.audioTrack)
@@ -694,6 +699,7 @@ func (p *peer) logTraceSnapshot() {
 	}
 	p.inputMu.Unlock()
 
+	bandwidthStats := p.bandwidth.GetStats()
 	fields := []zap.Field{
 		zap.String("profile", p.videoProfile),
 		zap.String("codec", p.videoCodec.ID),
@@ -717,6 +723,11 @@ func (p *peer) logTraceSnapshot() {
 		zap.Int("video_requested_bitrate_kbps", p.service.source.Quality().BitrateKbps),
 		zap.Int64("video_encoder_bitrate_kbps", p.service.encoderBitrateKbps.Load()),
 		zap.Int64("video_congestion_bitrate_kbps", p.congestionBitrate.Load()/1000),
+		zap.Int("video_congestion_sent_kbps", statInt(bandwidthStats, "sentBitrate")/1000),
+		zap.Bool("video_congestion_application_limited", bandwidthStats["applicationLimited"] == true),
+		zap.String("video_congestion_delay_state", statString(bandwidthStats, "state")),
+		zap.String("video_congestion_delay_usage", statString(bandwidthStats, "usage")),
+		zap.Float64("video_congestion_average_loss", statFloat(bandwidthStats, "averageLoss")),
 		zap.Uint64("video_source_pts_regressions", p.videoPTSRegressions.Load()),
 		zap.Duration("video_produced_elapsed", time.Duration(p.videoProducedElapsed.Load())),
 		zap.Duration("video_rtp_elapsed", time.Duration(p.videoRTPElapsed.Load())),
