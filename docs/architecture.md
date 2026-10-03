@@ -58,12 +58,24 @@ timestamp regression cannot pause `videorate`. `videorate` caps each encoder
 branch without manufacturing queued duplicate frames.
 
 Encoded samples use blocking handoff. Encoded reference chains are not dropped
-between the encoder and peer writers. Pion's GCC interceptor uses transport-wide
-congestion feedback, while RTP is emitted without its shared FIFO pacer so Opus
-cannot wait behind a large video access unit. The shared encoder uses the lowest
-active peer estimate, capped by the bitrate selected by the user. Encoder updates
-use a five-percent or 250 Kbit/s hysteresis to avoid forcing VA-API rate-control
-reconfiguration for every small GCC estimate change.
+between the encoder and peer writers. RTP is emitted without Pion's shared FIFO
+pacer so Opus cannot wait behind a large video access unit.
+
+Each peer estimates its bandwidth from transport-wide congestion feedback.
+Pion's GCC detects delay overuse and loss, but the service owns the target
+bitrate. GCC derives its target from the received rate, so a static desktop that
+sends far below its budget would decay the estimate to the floor. The service
+treats a peer as application-limited while video uses less than 65 percent of
+the encoder bitrate and leaves that state above 80 percent. An
+application-limited peer holds its estimate against delay signals. Otherwise,
+overuse lowers the estimate to GCC's 85 percent of the acknowledged rate, and
+normal delay raises it by up to eight percent per second, capped at 1.5 times
+the sent video rate. Loss above ten percent lowers the estimate in every state.
+
+The shared encoder uses the lowest active peer estimate, capped by the bitrate
+selected by the user. Encoder updates use a five-percent or 250 Kbit/s
+hysteresis to avoid forcing VA-API rate-control reconfiguration for every small
+estimate change.
 
 ## Encoder profiles and quality changes
 
@@ -117,13 +129,16 @@ A new peer ignores inter-frames until it receives a decodable keyframe.
 ## Audio
 
 Optional audio uses `pulsesrc` against a PipeWire PulseAudio monitor, converts
-to stereo S16LE at 48 kHz, and encodes 20 ms Opus frames. Audio and video share
-the same WebRTC media stream ID. Their independent capture pipelines are not
-calibrated for sample-accurate lip sync.
+to stereo S16LE at 48 kHz, and encodes 20 ms Opus frames.
+
+Audio and video use separate WebRTC media stream IDs, so the browser does not
+synchronize them. Video RTP time follows encoded-frame production while audio
+RTP time follows the PulseAudio sample clock. Synchronizing those clocks made
+Chromium hold video for hundreds of milliseconds, growing as they drifted.
+Interactive latency takes priority over lip sync.
 
 The embedded client requests a 10 ms browser jitter-buffer target for both
-receivers. Applying the same target to audio and video keeps lip sync from
-forcing the video receiver back to Chromium's larger default queue.
+receivers.
 
 ## Embedding
 
