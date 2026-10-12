@@ -119,7 +119,11 @@
             inherit version;
 
             src = sourceWithFrontend;
-            pwd = sourceWithFrontend;
+            # gomod2nix reads go.mod from pwd while evaluating. A plain path keeps
+            # that out of the build: sourceWithFrontend is a derivation, so
+            # reading from it is import-from-derivation and breaks
+            # `nix flake check --no-build` for consumers.
+            pwd = source;
             modules = ./gomod2nix.toml;
             modRoot = ".";
             subPackages = [ "cmd/webdesktop" ];
@@ -189,7 +193,7 @@
               inherit version;
 
               src = sourceWithFrontend;
-              pwd = sourceWithFrontend;
+              pwd = source;
               modules = ./gomod2nix.toml;
               modRoot = ".";
               doCheck = false;
